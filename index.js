@@ -217,103 +217,151 @@ function extractComunaCiudad(text) {
 ========================= */
 
 function parseItems(text) {
-  const t = text || "";
+  const t = (text || "")
+    .replace(/\r/g, "\n")
+    .replace(/\u00A0/g, " ")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n{2,}/g, "\n");
 
-  // 1) Busca inicio de la tabla
-  let startIdx = t.search(/Codigo\s+Descripcion/i);
-  if (startIdx === -1) startIdx = t.search(/C[oó]digo\s+Descrip/i);
-  if (startIdx === -1) startIdx = t.search(/\bCodigo\b/i);
-  if (startIdx === -1) return [];
+  // Código tipo HC-101 / HP-02 / etc.
+  const codeRe = /\b([A-Z0-9]{1,8}-[A-Z0-9]{1,8})\b/g;
 
-  let afterStart = t.slice(startIdx);
+  // Cortes típicos donde ya NO hay ítems
+  const stopRe = /\b(Referencias:|MONTO NETO|I\.V\.A\.|TOTAL)\b/i;
 
-  // 2) Corta antes de Referencias o Montos
-  const stopIdx = afterStart.search(/\n\s*(Referencias:|MONTO NETO|I\.V\.A\.|TOTAL)\b/i);
-  const block = stopIdx === -1 ? afterStart : afterStart.slice(0, stopIdx);
+  // Toma solo desde el primer código hasta antes de montos/referencias (si existe)
+  let working = t;
+  const firstCode = working.search(codeRe);
+  if (firstCode === -1) return [];
 
-  // 3) Limpia líneas y quita encabezados
-  const lines = block
-    .split("\n")
-    .map(l => l.replace(/\s+/g, " ").trim())
-    .filter(Boolean)
-    .filter(l => !/^Codigo\s+Descripcion/i.test(l))
-    .filter(l => !/^C[oó]digo\s+Descrip/i.test(l))
-    .filter(l => !/^Cantidad\s+Precio/i.test(l))
-    .filter(l => !/^Adic\.\*/i.test(l))
-    .filter(l => !/%Desc\./i.test(l));
+  working = working.slice(firstCode);
+  const stop = working.search(stopRe);
+  if (stop !== -1) working = working.slice(0, stop);
 
-  const codeRe = /^([A-Z0-9]{1,8}-[A-Z0-9]{1,8})\b/;
+  // Encuentra todas las posiciones de códigos
+  const matches = [...working.matchAll(codeRe)];
+  if (!matches.length) return [];
 
-  // Captura: codigo | descripcion... | cantidad | unidad opcional | precio | valor
-  const rowRe = new RegExp(
-    "^([A-Z0-9]{1,8}-[A-Z0-9]{1,8})\\s+" +        // código
-    "([\\s\\S]*?)\\s+" +                          // descripción (no-greedy)
-    "([0-9][0-9\\.]*)" +                          // cantidad
-    "(?:\\s+([A-Za-zÁÉÍÓÚÑñ\\.]{1,10}))?\\s+" +   // unidad opcional
-    "([0-9][0-9\\.]*)\\s+" +                      // precio
-    "(?:[0-9][0-9\\.]*\\s+)?" +                   // adic opcional
-    "(?:[0-9][0-9\\.]*\\s+)?" +                   // %desc opcional
-    "([0-9][0-9\\.]*)$",                          // valor
-    "i"
-  );
+  // Helpers
+  const cleanDesc = (s) =>
+    (s || "")
+      .replace(/\s+/g, " ")
+      .trim();
+
+  const isMoneyish = (s) => /^[0-9][0-9\.]*$/.test(s);      // 18.000 / 399.000 / 450 / 620
+  const isQty = (s) => /^[0-9][0-9\.]*$/.test(s);          // 40 / 1.400
+  const isUnit = (s) => /^[A-Za-zÁÉÍÓÚÑñ\.]{1,10}$/.test(s); // KG / UN / etc.
 
   const items = [];
-  let current = null;
 
-  function pushCurrent() {
-    if (!current) return;
+  for (let i = 0; i < matches.length; i++) {
+    const code = matches[i][1];
+    const start = matches[i].index ?? 0;
+    const end = (i + 1 < matches.length) ? (matches[i + 1].index ?? working.length) : working.length;
 
-    const joined = current.lines.join(" ").replace(/\s+/g, " ").trim();
-    const m = joined.match(rowRe);
+    // Bloque del ítem (texto entre este código y el siguiente código)
+    let chunk = working.slice(start, end);
 
-    if (m) {
-      const codigo = m[1];
-      const descripcion = (m[2] || "").trim();
-      const cantidadNum = (m[3] || "").trim();
-      const unidad = (m[4] || "").trim();
-      const precio = (m[5] || "").trim();
-      const valor = (m[6] || "").trim();
+    // Normaliza el chunk
+    chunk = chunk.replace(/\n/g, " ").replace(/\s+/g, " ").trim();
 
-      items.push({
-        codigo,
-        descripcion,
-        cantidad: unidad ? `${cantidadNum} ${unidad}` : cantidadNum,
-        precio,
-        valor,
-      });
-    } else {
-      // fallback mínimo
-      const first = current.lines[0] || "";
-      const mm = first.match(codeRe);
-      const codigo = mm ? mm[1] : null;
-      const desc = joined.replace(codeRe, "").trim();
+    // Quita el código al inicio para quedarnos con el resto
+    chunk = chunk.replace(new RegExp("^" + code.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\s*"), "");
 
-      if (codigo) {
-        items.push({
-          codigo,
-          descripcion: desc || null,
-          cantidad: null,
-          precio: null,
-          valor: null,
-        });
+    // Tokeniza
+    const tokens = chunk.split(" ").filter(Boolean);
+
+    // Heurística:
+    // Al final suelen venir: cantidad [unidad] precio valor
+    // - Caso A: "40 450 18.000"
+    // - Caso B: "1.400 KG 285 399.000"
+    // - Algunas facturas meten "Adic." "%Desc." en medio, pero al final igual está el valor.
+    //
+    // Estrategia: desde el final, busca los últimos 2 "moneyish" como precio y valor,
+    // y antes de eso busca cantidad + unidad opcional.
+
+    let valor = null;
+    let precio = null;
+    let cantidad = null;
+
+    // 1) Encuentra desde el final los 2 últimos números tipo dinero
+    let idxValor = -1;
+    let idxPrecio = -1;
+
+    for (let k = tokens.length - 1; k >= 0; k--) {
+      if (isMoneyish(tokens[k])) {
+        if (idxValor === -1) idxValor = k;
+        else {
+          idxPrecio = k;
+          break;
+        }
       }
     }
 
-    current = null;
-  }
+    if (idxValor !== -1) valor = tokens[idxValor];
+    if (idxPrecio !== -1) precio = tokens[idxPrecio];
 
-  for (const line of lines) {
-    const m = line.match(codeRe);
-    if (m) {
-      pushCurrent();
-      current = { lines: [line] };
-    } else if (current) {
-      current.lines.push(line);
+    // 2) Cantidad: busca hacia atrás antes de idxPrecio (o idxValor si no hay precio)
+    const limit = (idxPrecio !== -1 ? idxPrecio : idxValor);
+    if (limit > 0) {
+      // patrones:
+      // - qty unit (ej: 1.400 KG)
+      // - qty (ej: 40)
+      // Tomamos el último qty antes del precio/valor
+      for (let k = limit - 1; k >= 0; k--) {
+        if (isQty(tokens[k])) {
+          const maybeUnit = tokens[k + 1];
+          if (maybeUnit && isUnit(maybeUnit) && (k + 1) < limit) {
+            cantidad = `${tokens[k]} ${maybeUnit}`;
+          } else {
+            cantidad = tokens[k];
+          }
+          break;
+        }
+      }
     }
-  }
-  pushCurrent();
 
-  return items.filter(it => it.codigo);
+    // 3) Descripción = todo lo anterior a la cantidad (si encontramos cantidad)
+    let descTokens = tokens;
+    if (cantidad) {
+      // si cantidad es "1.400 KG" ocupa 2 tokens; si es "40" 1 token
+      const qtyParts = cantidad.split(" ");
+      // busca dónde aparece la cantidad en tokens para cortar descripción antes
+      let cutIdx = -1;
+      for (let k = 0; k < tokens.length; k++) {
+        if (tokens[k] === qtyParts[0]) {
+          if (qtyParts.length === 2) {
+            if (tokens[k + 1] === qtyParts[1]) cutIdx = k;
+          } else {
+            cutIdx = k;
+          }
+        }
+        if (cutIdx !== -1) break;
+      }
+      if (cutIdx !== -1) descTokens = tokens.slice(0, cutIdx);
+    } else if (idxPrecio !== -1) {
+      // fallback: si hay precio, desc antes del precio
+      descTokens = tokens.slice(0, idxPrecio);
+    } else if (idxValor !== -1) {
+      // fallback: desc antes del valor
+      descTokens = tokens.slice(0, idxValor);
+    }
+
+    const descripcion = cleanDesc(descTokens.join(" "));
+
+    // Si no hay nada útil, lo saltamos
+    if (!descripcion && !cantidad && !precio && !valor) continue;
+
+    items.push({
+      codigo: code,
+      descripcion: descripcion || null,
+      cantidad: cantidad || null,
+      precio: precio || null,
+      valor: valor || null,
+    });
+  }
+
+  return items;
 }
 
 /* =========================
@@ -402,3 +450,4 @@ app.post("/api/upload-pdf", upload.single("pdf"), async (req, res) => {
 // Render: usar el puerto que te asigna la plataforma
 const PORT = process.env.PORT || 5050;
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
+
