@@ -219,10 +219,7 @@ function extractComunaCiudad(text) {
 }
 
 /* =========================
-   ITEMS (MUY ROBUSTO)
-   - Ancla cantidad/precio/valor desde el FINAL del ítem
-   - Evita caer en "20 BOLSAS DE 2 KG" como cantidad/precio
-   - cantidad final = SOLO número (sin unidad)
+   ITEMS
 ========================= */
 
 /**
@@ -231,10 +228,12 @@ function extractComunaCiudad(text) {
  *  - "HP- 02"  -> "HP-02"
  *  - "HP -02"  -> "HP-02"
  *  - "HP - 02" -> "HP-02"
+ *  - soporte 2-5 letras y 1-5 dígitos
  */
 function repairBrokenCodes(s) {
   return (s || "").replace(/([A-Z]{2,5})\s*-\s*(\d{1,5})/g, "$1-$2");
 }
+
 function deglueItemTail(line) {
   let s = (line || "").trim();
 
@@ -245,7 +244,6 @@ function deglueItemTail(line) {
     .replace(/\s+/g, " ")
     .trim();
 
-  // Helpers
   const stripLeadZeros = (x) => {
     const out = String(x || "").replace(/^0+(?=\d)/, "");
     return out === "" ? "0" : out;
@@ -259,69 +257,51 @@ function deglueItemTail(line) {
   // Si ya está bien separado al final, no tocar
   if (tailOkRe.test(s)) return s;
 
-  // Caso especial: dos montos con miles PEGADOS al final
-  // Ej: "... 13.5003.500" -> "... 13.500 3.500"
-  // Luego intentamos formar "... <qty> <precio> <valor>"
+  // Caso especial: dos montos con miles PEGADOS al final -> "... 13.5003.500"
   const mTwo = s.match(/(\d{1,3}(?:\.\d{3})+)(\d{1,3}(?:\.\d{3})+)\s*$/);
   if (mTwo) {
-    const a = mTwo[1]; // ej 13.500
-    const b = mTwo[2]; // ej 3.500
+    const a = mTwo[1];
+    const b = mTwo[2];
 
     const endLen = (a + b).length;
     const base = s.slice(0, s.length - endLen).trim();
 
-    // Si base ya termina con una cantidad (número), la respetamos.
-    // Si no, asumimos cantidad=1 (muy común en "servicios/transporte")
     const hasQty = /(\d{1,3}(?:\.\d{3})*|\d+)\s*$/.test(base);
 
     let rebuilt;
-    
     if (/TRANSPORTE/i.test(base)) {
-      // Para transporte, suele ser: qty=1, precio=último monto, valor=último monto
+      // Para transporte, forzamos qty=1 y usamos el último monto como precio/valor
       rebuilt = `${base} 1 ${b} ${b}`;
     } else {
-      rebuilt = hasQty
-        ? `${base} ${a} ${b}`
-        : `${base} 1 ${a} ${b}`;
+      rebuilt = hasQty ? `${base} ${a} ${b}` : `${base} 1 ${a} ${b}`;
     }
 
-    // Si con eso ya calza el tail normal, retornamos
     if (tailOkRe.test(rebuilt)) return rebuilt;
-
-    // Si no calza, igual devolvemos separado (ayuda al tailRe afuera)
     return rebuilt;
   }
-  
+
   // Caso: algo termina con ".000" (o ".123") y viene pegado tipo "4045018.000"
   const m = s.match(/(\d+)(\.\d{3})+\s*$/);
   if (!m) return s;
 
-  const dotsPart = m[0].trim(); // ej "4045018.000"
+  const dotsPart = m[0].trim();
   const idxDots = s.lastIndexOf(dotsPart);
   const beforeAll = s.slice(0, idxDots).trim();
 
-  // Separa digitsBeforeDot y suffix ".000..."
-  // Para 4045018.000 -> digitsBeforeDot="4045018", suffix=".000"
   const firstDot = dotsPart.indexOf(".");
   const digitsBeforeDot = dotsPart.slice(0, firstDot);
-  const suffix = dotsPart.slice(firstDot); // incluye todos los .xxx
+  const suffix = dotsPart.slice(firstDot);
 
-  // Vamos a probar valorFirstLen = 1..3 tomando los ÚLTIMOS dígitos antes del punto:
-  // "4045018" -> "8" / "18" / "018"
-  // y ver cuál permite separar el resto en qty+price plausible.
   let best = null;
+  const gluedBase = digitsBeforeDot;
 
-  const gluedBase = digitsBeforeDot; // solo dígitos
   for (let valFirstLen = 1; valFirstLen <= 3; valFirstLen++) {
     if (gluedBase.length < valFirstLen) continue;
 
     const valFirst = gluedBase.slice(-valFirstLen);
-    const glued = gluedBase.slice(0, -valFirstLen); // lo que queda para qty+price
-
-    // Si no queda nada para qty+price, descartar
+    const glued = gluedBase.slice(0, -valFirstLen);
     if (!glued) continue;
 
-    // Separar glued en [qty][price] probando largos de precio
     for (let priceLen = 2; priceLen <= 6; priceLen++) {
       if (glued.length <= priceLen) continue;
 
@@ -332,27 +312,19 @@ function deglueItemTail(line) {
       const price = parseInt(priceDigits, 10);
 
       if (!Number.isFinite(qty) || !Number.isFinite(price)) continue;
-
-      // Rangos razonables (ajusta si lo necesitas)
       if (qty <= 0 || qty > 100000) continue;
       if (price <= 0 || price > 2000000) continue;
 
-      // Valor reconstruido (quita ceros líderes del primer grupo)
       const valor = `${stripLeadZeros(valFirst)}${suffix}`;
 
-      // Score: preferir qty de 2-4 dígitos y price de 2-5 dígitos
-      // (esto hace que 40/450 gane sobre 4/045)
       let score =
         Math.abs(qtyDigits.length - 2) * 10 +
         Math.abs(priceLen - 3) * 5 +
         valFirstLen;
-      
-      // Penaliza soluciones típicamente malas
-      if (qtyDigits.length === 1) score += 40;              // evita 4 en vez de 40, 1 en vez de 100
-      if (parseInt(priceDigits, 10) < 100) score += 35;     // evita 45 en vez de 450 (ajusta si tienes precios <100 reales)
-      if (/^0\d/.test(valFirst)) score += 25;               // evita 018.000 si existe 18.000
-      
-      // Premia cantidades que terminan en 0 (muy común en tus docs: 40, 100, 700...)
+
+      if (qtyDigits.length === 1) score += 40;
+      if (parseInt(priceDigits, 10) < 100) score += 35;
+      if (/^0\d/.test(valFirst)) score += 25;
       if (/0$/.test(qtyDigits)) score -= 10;
 
       if (!best || score < best.score) {
@@ -371,6 +343,7 @@ function deglueItemTail(line) {
   const rebuiltTail = `${best.qtyDigits} ${best.priceDigits} ${best.valor}`.trim();
   return `${beforeAll ? beforeAll + " " : ""}${rebuiltTail}`.trim();
 }
+
 function parseItems(text) {
   let t = (text || "")
     .replace(/\r/g, "\n")
@@ -378,14 +351,11 @@ function parseItems(text) {
     .replace(/[ \t]+/g, " ")
     .replace(/\n{2,}/g, "\n");
 
-  // 1) Reparar códigos partidos
   t = repairBrokenCodes(t);
 
-  // Código de producto (sin \b final para permitir pegado)
   const codeReGlobal = /\b([A-Z]{2,5}-\d{1,5})/g;
   const codeReOne = /\b([A-Z]{2,5}-\d{1,5})/;
 
-  // Cortes típicos donde ya NO hay ítems
   const stopRe = /\b(Referencias:|Forma de Pago:|MONTO NETO|I\.V\.A\.|TOTAL)\b/i;
 
   const firstCode = t.search(codeReOne);
@@ -398,31 +368,32 @@ function parseItems(text) {
   const matches = [...working.matchAll(codeReGlobal)];
   if (!matches.length) return [];
 
-  const cleanDesc = (s) =>
-    (s || "")
-      .replace(/\s+/g, " ")
-      .trim();
+  const cleanDesc = (s) => (s || "").replace(/\s+/g, " ").trim();
 
-  // Números tipo Chile: 40, 450, 18.000, 1.400, etc.
   const numRe = "\\d{1,3}(?:\\.\\d{3})*|\\d+";
   const unitRe = "[A-Za-zÁÉÍÓÚÑñ\\.]{1,12}";
 
-  // ANCLA DESDE EL FINAL:
-  // ... <cantidad> <unidad opcional> <precio> <valor> (al final del ítem)
-  //
-  // Ej: "40 450 18.000"
-  // Ej: "1.400 KG 285 399.000"
+  // Tail ideal al final
   const tailRe = new RegExp(
     `(?:^|\\s)(${numRe})\\s*(?:(${unitRe})\\s+)?(${numRe})\\s+(${numRe})\\s*$`
   );
-  // Fallback: ignora 0–2 "basuras" entre precio y valor (0, 0%, -, —, etc.)
-  const tailReSkip = new RegExp(
-    `(?:^|\\s)(${numRe})\\s*(?:(${unitRe})\\s+)?(${numRe})` +
-      `(?:\\s+(?:0(?:[\\.,]00)?|0%|[-—])){0,2}` +
-      `\\s+(${numRe})\\s*$`
+
+  // Fallback: encontrar qty/unit?/precio/valor en cualquier parte (tomamos el ÚLTIMO match)
+  const tailFindRe = new RegExp(
+    `(${numRe})\\s*(?:(${unitRe})\\s+)?(${numRe})\\s+(${numRe})`,
+    "g"
   );
+
+  const sanitizeTail = (s) =>
+    (s || "")
+      .replace(/[$*]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+
   // Ruido típico que NO debería quedar en descripción (si se cuela)
   const noiseRe = /\b(LOTE|DESDE|HASTA)\s*:?\s*.*$/i;
+
+  const stripLeadZeros = (x) => String(x || "").replace(/^0+(?=\d)/, "");
 
   const items = [];
 
@@ -436,22 +407,29 @@ function parseItems(text) {
 
     let chunk = working.slice(start, end);
 
-    // normaliza chunk
     chunk = repairBrokenCodes(chunk);
     chunk = chunk.replace(/\n/g, " ").replace(/\s+/g, " ").trim();
-    
-    // FIX: despega el tail cuando viene aplastado (ej 4045018.000)
     chunk = deglueItemTail(chunk);
 
     // Quita el código al inicio
     const codeEsc = code.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     chunk = chunk.replace(new RegExp("^" + codeEsc + "\\s*"), "").trim();
 
-    // 2) Extraer tail (cantidad/precio/valor) desde el FINAL del chunk
-    const mTail = chunk.match(tailRe) || chunk.match(tailReSkip);
+    const chunkSan = sanitizeTail(chunk);
 
+    // 1) Intento normal: tail al final
+    let mTail = chunkSan.match(tailRe);
+    let lastFound = null;
+
+    // 2) Fallback: buscar el ÚLTIMO patrón dentro del chunk (para PDFs donde el tail no queda al final)
     if (!mTail) {
-      const descripcion = cleanDesc(chunk.replace(noiseRe, "").trim()) || null;
+      for (const m of chunkSan.matchAll(tailFindRe)) lastFound = m;
+      if (lastFound) mTail = lastFound;
+    }
+
+    // Si no pudimos extraer números, dejamos solo descripción
+    if (!mTail) {
+      const descripcion = cleanDesc(chunkSan.replace(noiseRe, "").trim()) || null;
       if (descripcion) {
         items.push({
           codigo: code,
@@ -464,26 +442,24 @@ function parseItems(text) {
       continue;
     }
 
-    const qtyRaw = mTail[1];      // ej: "40" o "1.400"
-    const unit = mTail[2] || "";  // ej: "KG" (opcional)
-    const precioRaw = mTail[3];   // ej: "450" o "285"
-    const valorRaw = mTail[4];    // ej: "18.000" o "399.000"
+    const qtyRaw = mTail[1];
+    const precioRaw = mTail[3];
+    const valorRaw = mTail[4];
 
-    const stripLeadZeros = (x) => String(x || "").replace(/^0+(?=\d)/, "");
-    
     const cantidad = stripLeadZeros(qtyRaw);
     const precio = stripLeadZeros(precioRaw);
-    
-    // valor: elimina ceros a la izquierda solo del primer grupo (018.000 -> 18.000)
     const valor = String(valorRaw || "").replace(/^0+(?=\d)/, "");
 
-    // 3) Descripción = todo lo anterior al tail
-    const tailFull = mTail[0]; // incluye espacios
-    let descPart = chunk.slice(0, chunk.length - tailFull.length).trim();
+    // Descripción: cortar antes del match encontrado
+    let descPart;
+    if (lastFound && typeof lastFound.index === "number") {
+      descPart = chunkSan.slice(0, lastFound.index).trim();
+    } else {
+      const tailFull = mTail[0];
+      descPart = chunkSan.slice(0, chunkSan.length - tailFull.length).trim();
+    }
 
-    // limpieza de ruido típico en descripción
     descPart = descPart.replace(noiseRe, "").trim();
-
     const descripcion = cleanDesc(descPart) || null;
 
     items.push({
@@ -515,11 +491,23 @@ function extractFacturaKolderStyle(fullText) {
     "SEÑOR (ES):",
   ]);
 
-  let rut = pickAfterLabel(text, ["RUT", "RUT:", "R.U.T", "R.U.T.", "R.U.T:", "R.U.T.:"]);
+  let rut = pickAfterLabel(text, [
+    "RUT",
+    "RUT:",
+    "R.U.T",
+    "R.U.T.",
+    "R.U.T:",
+    "R.U.T.:",
+  ]);
   if (!rut) rut = findRutByPattern(text);
 
   const giro = pickAfterLabel(text, ["GIRO", "GIRO:"]);
-  const direccion = pickAfterLabel(text, ["DIRECCION", "DIRECCIÓN", "DIRECCION:", "DIRECCIÓN:"]);
+  const direccion = pickAfterLabel(text, [
+    "DIRECCION",
+    "DIRECCIÓN",
+    "DIRECCION:",
+    "DIRECCIÓN:",
+  ]);
   const contacto = pickAfterLabel(text, ["CONTACTO", "CONTACTO:"]);
   const fecha_emision = pickFechaEmision(text);
 
@@ -559,7 +547,8 @@ app.get("/health", (req, res) => res.json({ ok: true }));
 
 app.post("/api/upload-pdf", upload.single("pdf"), async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ ok: false, error: "Falta archivo PDF" });
+    if (!req.file)
+      return res.status(400).json({ ok: false, error: "Falta archivo PDF" });
 
     const parsed = await pdf(req.file.buffer);
     const text = normalizeText(parsed.text);
@@ -588,11 +577,3 @@ app.post("/api/upload-pdf", upload.single("pdf"), async (req, res) => {
 // Render: usar el puerto que te asigna la plataforma
 const PORT = process.env.PORT || 5050;
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
-
-
-
-
-
-
-
-
