@@ -253,7 +253,7 @@ function extractComunaCiudad(text) {
     if (m && m[1]) {
       let v = m[1].split(cutRe)[0]; // corta al aparecer otra etiqueta
       // si también contiene "CIUDAD" pegado, cortamos antes
-      v = v.split(/\bCIUDAD\b/i)[0];
+      v = v.split(/CIUDAD\s*:?/i)[0];
       comuna = cleanValue(v);
     }
   }
@@ -356,3 +356,4 @@ app.post("/api/upload-pdf", upload.single("pdf"), async (req, res) => {
 // Render: usar el puerto que te asigna la plataforma
 const PORT = process.env.PORT || 5050;
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
+
