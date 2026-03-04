@@ -25,7 +25,7 @@ const upload = multer({
 });
 
 /* =========================
-   PARSER ROBUSTO
+   UTILIDADES
 ========================= */
 
 function normalizeText(t) {
@@ -45,6 +45,7 @@ function cleanValue(v) {
   if (v == null) return null;
   return (
     String(v)
+      // quita cosas raras al inicio/fin
       .replace(/^[\s.:;-]+/, "")
       .replace(/[\s.:;-]+$/, "")
       .replace(/\s{2,}/g, " ")
@@ -56,7 +57,7 @@ function cleanValue(v) {
 function stripTrailingLabels(value) {
   if (!value) return value;
   const stopRe =
-    /\b(CONTACTO|GIRO|DIRECCI[ÓO]N|COMUNA|CIUDAD|FECHA\s+EMISI[ÓO]N|MONTO\s+NETO|I\.V\.A\.|TOTAL|REFERENCIAS|FORMA\s+DE\s+PAGO)\b/i;
+    /\b(CONTACTO|GIRO|DIRECCI[ÓO]N|COMUNA|CIUDAD|FECHA\s+EMISI[ÓO]N|MONTO\s+NETO|I\.V\.A\.|TOTAL|REFERENCIAS|CODIGO|DESCRIPCION)\b/i;
   const idx = value.search(stopRe);
   if (idx > 0) return value.slice(0, idx).trim();
   return value.trim();
@@ -74,7 +75,7 @@ function keepFirstPageOnly(text) {
 }
 
 /**
- * Encuentra valor asociado a etiqueta (muy tolerante)
+ * Encuentra valor asociado a etiqueta (tolerante)
  * - ":" opcional
  * - valor misma línea o siguiente
  * - limpia ":" y corta si vienen etiquetas pegadas
@@ -107,7 +108,7 @@ function pickAfterLabel(text, labelVariants) {
     }
   }
 
-  // Caso 3 fallback: chunk cercano
+  // Caso 3 fallback: chunk cercano (por si el PDF mete saltos raros)
   for (const label of labelVariants) {
     const idx = t.toUpperCase().indexOf(label.toUpperCase());
     if (idx !== -1) {
@@ -163,7 +164,7 @@ function parseReferences(text) {
     .map((l) => l.replace(/^-+\s*/, ""));
 }
 
-// Fallback: detecta un RUT por patrón
+// Fallback: detecta un RUT por patrón (12.345.678-9 o 12345678-9 o con K)
 function findRutByPattern(text) {
   const t = text || "";
   const m = t.match(/\b\d{1,2}\.?\d{3}\.?\d{3}-[0-9Kk]\b/);
@@ -171,7 +172,7 @@ function findRutByPattern(text) {
 }
 
 /**
- * Extrae un bloque “de ubicación”
+ * Extrae un bloque de texto “de ubicación”
  */
 function getLocationBlock(text) {
   const t = text || "";
@@ -179,9 +180,7 @@ function getLocationBlock(text) {
   if (start === -1) return t;
 
   const after = t.slice(start);
-  const stop = after.search(
-    /\n(Fecha\s+Emisi[óo]n|MONTO\s+NETO|Codigo\s+Descripcion)\b/i
-  );
+  const stop = after.search(/\n(Fecha\s+Emisi[óo]n|MONTO\s+NETO|Codigo\s+Descripcion)\b/i);
   const block = stop === -1 ? after.slice(0, 450) : after.slice(0, stop);
   return block;
 }
@@ -193,7 +192,7 @@ function extractComunaCiudad(text) {
   const block = getLocationBlock(text);
 
   const cutRe =
-    /(?=\b(CONTACTO|GIRO|DIRECCI[ÓO]N|FECHA\s+EMISI[ÓO]N|MONTO\s+NETO|TOTAL|I\.V\.A\.|FORMA\s+DE\s+PAGO)\b)/i;
+    /(?=\b(CONTACTO|GIRO|DIRECCI[ÓO]N|FECHA\s+EMISI[ÓO]N|MONTO\s+NETO|TOTAL|I\.V\.A\.|CODIGO|DESCRIPCION)\b)/i;
 
   let comuna = null;
   {
@@ -219,149 +218,199 @@ function extractComunaCiudad(text) {
 }
 
 /* =========================
-   ITEMS (ROBUSTO + FIX CODIGO PARTIDO)
+   ITEMS (ROBUSTO POR "FILA")
+   - SOLO usa la línea donde aparece el código (HC-101 / HP-02 / etc.)
+   - Repara números pegados tipo "4045018.000" => 40 / 450 / 18.000
+   - cantidad => SOLO número (string), unidad aparte
 ========================= */
 
-/**
- * Une códigos rotos tipo:
- *  - "HP-\n02" -> "HP-02"
- *  - "HP- 02"  -> "HP-02"
- *  - "HP -02"  -> "HP-02"
- */
-function repairBrokenCodes(s) {
-  return (s || "").replace(/([A-Z]{2})\s*-\s*(\d{1,4})/g, "$1-$2");
+function isThousandsMoney(s) {
+  // 18.000 / 399.000 / 1.234.567
+  return /^[0-9]{1,3}(?:\.[0-9]{3})+$/.test(s);
+}
+function isPlainNumber(s) {
+  // 450 / 285 / 620 / 40 / 100 / 1400
+  return /^[0-9]+$/.test(s);
+}
+function isQtyWithDots(s) {
+  // 1.400
+  return /^[0-9]{1,3}(?:\.[0-9]{3})+$/.test(s) || /^[0-9]+$/.test(s);
+}
+
+function splitPackedQtyPriceValue(token) {
+  // Caso típico: 4045018.000  => qty=40, price=450, value=18.000
+  //            10062062.000 => qty=100, price=620, value=62.000
+  // Heurística: termina con NNN.NNN (o N.NNN etc), antes vienen qty+price pegados
+  const m = token.match(/^(\d+)(\d{2,4})(\d{1,3}(?:\.\d{3})+)$/);
+  if (!m) return null;
+  const qty = m[1];
+  const price = m[2];
+  const value = m[3];
+  return { qty, unit: null, price, value };
+}
+
+function parseRowTail(line) {
+  const raw = line.trim();
+
+  // 1) Caso con espacios y unidad opcional al medio:
+  // ... 1.400 KG 285 399.000
+  // ... 40 450 18.000
+  // ... 100 620 62.000
+  let m = raw.match(
+    /(\d[\d\.]*)\s+([A-Za-zÁÉÍÓÚÑñ\.]{1,10})\s+(\d[\d\.]*)\s+(\d[\d\.]*)\s*$/
+  );
+  if (m) {
+    const qtyRaw = m[1];
+    const unitRaw = m[2];
+    const priceRaw = m[3];
+    const valueRaw = m[4];
+
+    // validación mínima
+    if (isQtyWithDots(qtyRaw) && isPlainNumber(priceRaw.replace(/\./g, "")) && /[0-9]/.test(valueRaw)) {
+      return {
+        qty: qtyRaw,
+        unit: unitRaw,
+        price: priceRaw,
+        value: valueRaw,
+        cutLen: m[0].length,
+      };
+    }
+  }
+
+  // 2) Caso sin unidad:
+  m = raw.match(/(\d[\d\.]*)\s+(\d[\d\.]*)\s+(\d[\d\.]*)\s*$/);
+  if (m) {
+    const qtyRaw = m[1];
+    const priceRaw = m[2];
+    const valueRaw = m[3];
+    // ojo: si value no parece dinero y qty/price/value se ven raros, aún lo aceptamos,
+    // pero esto suele funcionar bien.
+    if (isQtyWithDots(qtyRaw)) {
+      return {
+        qty: qtyRaw,
+        unit: null,
+        price: priceRaw,
+        value: valueRaw,
+        cutLen: m[0].length,
+      };
+    }
+  }
+
+  // 3) Caso números pegados: "4045018.000"
+  const lastToken = raw.split(/\s+/).slice(-1)[0];
+  const packed = splitPackedQtyPriceValue(lastToken);
+  if (packed) {
+    return {
+      qty: packed.qty,
+      unit: null,
+      price: packed.price,
+      value: packed.value,
+      cutLen: lastToken.length,
+      packedOnlyLastToken: true,
+    };
+  }
+
+  // 4) Caso extremo: "1.400KG285399.000" pegado (sin espacios)
+  // qty (con puntos) + unidad + precio + valor(con puntos)
+  const m2 = raw.match(/^(.+)\s+([0-9]{1,3}(?:\.[0-9]{3})+)([A-Za-z]{1,6})(\d{2,5})(\d{1,3}(?:\.\d{3})+)\s*$/);
+  if (m2) {
+    return {
+      qty: m2[2],
+      unit: m2[3],
+      price: m2[4],
+      value: m2[5],
+      cutLen: (m2[2] + m2[3] + m2[4] + m2[5]).length,
+    };
+  }
+
+  return null;
+}
+
+function normalizeQtyToNumberString(qtyRaw) {
+  if (!qtyRaw) return null;
+  // "1.400" => "1400"
+  return String(qtyRaw).replace(/\./g, "");
 }
 
 function parseItems(text) {
-  let t = (text || "")
-    .replace(/\r/g, "\n")
-    .replace(/\u00A0/g, " ")
-    .replace(/[ \t]+/g, " ")
-    .replace(/\n{2,}/g, "\n");
+  const t = normalizeText(text || "");
 
-  // FIX CLAVE: repara códigos partidos
-  t = repairBrokenCodes(t);
+  // Tomamos una ventana “solo ítems” para evitar mezclar con referencias/montos
+  const stopRe = /\b(Referencias:|MONTO NETO|I\.V\.A\.|TOTAL)\b/i;
 
-  // Código real de producto: 2 letras + "-" + 1-4 dígitos
-  // (SIN \b al final para permitir "HP-02HIELO" pegado)
-  const codeReGlobal = /\b([A-Z]{2}-\d{1,4})/g;
-  const codeReOne = /\b([A-Z]{2}-\d{1,4})/;
+  // Identifica comienzo por header o por primer código
+  const firstCodeIdx = t.search(/\b[A-Z]{2}-\d{1,4}\b/);
+  if (firstCodeIdx === -1) return [];
 
-  // Cortes típicos donde ya NO hay ítems
-  const stopRe = /\b(Referencias:|Forma de Pago:|MONTO NETO|I\.V\.A\.|TOTAL)\b/i;
-
-  const firstCode = t.search(codeReOne);
-  if (firstCode === -1) return [];
-
-  let working = t.slice(firstCode);
+  let working = t.slice(firstCodeIdx);
   const stop = working.search(stopRe);
   if (stop !== -1) working = working.slice(0, stop);
 
-  const matches = [...working.matchAll(codeReGlobal)];
-  if (!matches.length) return [];
-
-  const isMoneyish = (s) => /^[0-9][0-9\.]*$/.test(s); // 18.000 / 399.000 / 450
-  const isQty = (s) => /^[0-9][0-9\.]*$/.test(s); // 40 / 1.400
-  const isUnit = (s) => /^[A-Za-zÁÉÍÓÚÑñ\.]{1,12}$/.test(s); // KG / BOLSAS
-
-  const cleanDesc = (s) =>
-    (s || "")
-      .replace(/\s+/g, " ")
-      .trim();
+  const lines = working
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
 
   const items = [];
 
-  for (let i = 0; i < matches.length; i++) {
-    const code = matches[i][1];
-    const start = matches[i].index ?? 0;
-    const end =
-      i + 1 < matches.length ? matches[i + 1].index ?? working.length : working.length;
+  // Solo líneas que PARTEN con código
+  const codeLineRe = /^([A-Z]{2}-\d{1,4})\b\s*(.*)$/;
 
-    let chunk = working.slice(start, end);
+  for (const line of lines) {
+    const m = line.match(codeLineRe);
+    if (!m) continue;
 
-    // normaliza y repara de nuevo por si el chunk viene raro
-    chunk = repairBrokenCodes(chunk);
-    chunk = chunk.replace(/\n/g, " ").replace(/\s+/g, " ").trim();
+    const codigo = m[1];
+    let rest = (m[2] || "").trim();
 
-    // Quita el código al inicio
-    chunk = chunk.replace(
-      new RegExp("^" + code.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\s*"),
-      ""
-    );
+    // Si esta “línea de código” es en realidad algo que no es ítem (por PDF raro), skip
+    if (!rest) continue;
 
-    // tokens
-    const tokens = chunk.split(" ").filter(Boolean);
+    // Parse cola (cantidad/precio/valor) SOLO desde esta misma línea
+    const tail = parseRowTail(line);
 
-    // desde el final: valor y precio = dos últimos "moneyish"
-    let idxValor = -1;
-    let idxPrecio = -1;
-
-    for (let k = tokens.length - 1; k >= 0; k--) {
-      if (isMoneyish(tokens[k])) {
-        if (idxValor === -1) idxValor = k;
-        else {
-          idxPrecio = k;
-          break;
-        }
-      }
-    }
-
-    const valor = idxValor !== -1 ? tokens[idxValor] : null;
-    const precio = idxPrecio !== -1 ? tokens[idxPrecio] : null;
-
-    // cantidad antes del precio/valor
     let cantidad = null;
-    const limit = idxPrecio !== -1 ? idxPrecio : idxValor;
-    if (limit > 0) {
-      for (let k = limit - 1; k >= 0; k--) {
-        if (isQty(tokens[k])) {
-          const maybeUnit = tokens[k + 1];
-          if (maybeUnit && isUnit(maybeUnit) && k + 1 < limit) {
-            cantidad = `${tokens[k]} ${maybeUnit}`;
-          } else {
-            cantidad = tokens[k];
-          }
-          break;
-        }
+    let unidad = null;
+    let precio = null;
+    let valor = null;
+
+    let descripcion = rest;
+
+    if (tail) {
+      cantidad = normalizeQtyToNumberString(tail.qty);
+      unidad = tail.unit ? cleanValue(tail.unit) : null;
+
+      // precio: normalmente viene sin puntos (450/620/285). Si viene con puntos, los dejamos.
+      precio = tail.price ? cleanValue(tail.price) : null;
+      valor = tail.value ? cleanValue(tail.value) : null;
+
+      // Quita del final para que la descripción no incluya números
+      // (más seguro: recortar por match de tail sobre la línea original)
+      // Aquí recortamos en base a "rest" para no depender de espacios exactos del inicio.
+      // Buscamos el primer token de qty dentro de rest y cortamos ahí.
+      const qtyToken = String(tail.qty);
+      const idx = rest.lastIndexOf(qtyToken);
+      if (idx > 0) {
+        descripcion = rest.slice(0, idx).trim();
       }
+    } else {
+      // Sin cola: al menos devolvemos el código + descripción
+      descripcion = rest.trim();
     }
 
-    // descripción = todo antes de la cantidad (si existe), o antes de precio/valor
-    let descTokens = tokens;
+    descripcion = cleanValue(descripcion);
 
-    if (cantidad) {
-      const qtyParts = cantidad.split(" ");
-      let cutIdx = -1;
-      for (let k = 0; k < tokens.length; k++) {
-        if (tokens[k] === qtyParts[0]) {
-          if (qtyParts.length === 2) {
-            if (tokens[k + 1] === qtyParts[1]) cutIdx = k;
-          } else {
-            cutIdx = k;
-          }
-          if (cutIdx !== -1) break;
-        }
-      }
-      if (cutIdx !== -1) descTokens = tokens.slice(0, cutIdx);
-    } else if (idxPrecio !== -1) {
-      descTokens = tokens.slice(0, idxPrecio);
-    } else if (idxValor !== -1) {
-      descTokens = tokens.slice(0, idxValor);
+    // filtros anti-basura: si “descripcion” quedó como algo muy corto y sin números, igual puede servir
+    // pero evitamos cosas como "Referencias:" etc.
+    if (descripcion && /\b(Referencias:|Forma de Pago:|Timbre Electr[oó]nico|SII)\b/i.test(descripcion)) {
+      continue;
     }
-
-    let descripcion = cleanDesc(descTokens.join(" "));
-
-    // Limpieza de “ruido” típico dentro de la descripción (opcional, pero ayuda)
-    // evita que se pegue "Referencias:" si alcanzó a colarse
-    descripcion = descripcion.replace(/\bReferencias:\b.*$/i, "").trim() || null;
-
-    // Si no hay nada útil, saltar
-    if (!descripcion && !cantidad && !precio && !valor) continue;
 
     items.push({
-      codigo: code,
-      descripcion,
-      cantidad: cantidad || null,
+      codigo,
+      descripcion: descripcion || null,
+      cantidad: cantidad || null, // SOLO número (string)
+      unidad: unidad || null,     // extra (opcional)
       precio: precio || null,
       valor: valor || null,
     });
@@ -444,11 +493,12 @@ app.post("/api/upload-pdf", upload.single("pdf"), async (req, res) => {
     }
 
     const fields = extractFacturaKolderStyle(text);
+    const preview = text.slice(0, 2500);
 
     return res.json({
       ok: true,
       fields,
-      preview: text.slice(0, 2500),
+      preview,
       meta: { pages: parsed.numpages || null },
     });
   } catch (err) {
