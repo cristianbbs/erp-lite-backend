@@ -415,7 +415,12 @@ function parseItems(text) {
   const tailRe = new RegExp(
     `(?:^|\\s)(${numRe})\\s*(?:(${unitRe})\\s+)?(${numRe})\\s+(${numRe})\\s*$`
   );
-
+  // Fallback: ignora 0–2 "basuras" entre precio y valor (0, 0%, -, —, etc.)
+  const tailReSkip = new RegExp(
+    `(?:^|\\s)(${numRe})\\s*(?:(${unitRe})\\s+)?(${numRe})` +
+      `(?:\\s+(?:0(?:[\\.,]00)?|0%|[-—])){0,2}` +
+      `\\s+(${numRe})\\s*$`
+  );
   // Ruido típico que NO debería quedar en descripción (si se cuela)
   const noiseRe = /\b(LOTE|DESDE|HASTA)\s*:?\s*.*$/i;
 
@@ -443,7 +448,7 @@ function parseItems(text) {
     chunk = chunk.replace(new RegExp("^" + codeEsc + "\\s*"), "").trim();
 
     // 2) Extraer tail (cantidad/precio/valor) desde el FINAL del chunk
-    const mTail = chunk.match(tailRe);
+    const mTail = chunk.match(tailRe) || chunk.match(tailReSkip);
 
     if (!mTail) {
       const descripcion = cleanDesc(chunk.replace(noiseRe, "").trim()) || null;
@@ -583,6 +588,7 @@ app.post("/api/upload-pdf", upload.single("pdf"), async (req, res) => {
 // Render: usar el puerto que te asigna la plataforma
 const PORT = process.env.PORT || 5050;
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
+
 
 
 
