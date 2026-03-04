@@ -417,13 +417,13 @@ function parseItems(text) {
       // (mejor eso que contaminar columnas con números del medio)
       const descripcion = cleanDesc(chunk.replace(noiseRe, "").trim()) || null;
       if (descripcion) {
-        items.push({
-          codigo: code,
-          descripcion,
-          cantidad: null,
-          precio: null,
-          valor: null,
-        });
+      items.push({
+        codigo: code,
+        descripcion,
+        cantidad,
+        precio,
+        valor,
+      });
       }
       continue;
     }
@@ -433,8 +433,13 @@ function parseItems(text) {
     const precioRaw = mTail[3];   // ej: "450" o "285"
     const valorRaw = mTail[4];    // ej: "18.000" o "399.000"
 
-    // Importante: cantidad final SOLO número (sin unidad)
-    const cantidad = qtyRaw;
+    const stripLeadZeros = (x) => String(x || "").replace(/^0+(?=\d)/, "");
+    
+    const cantidad = stripLeadZeros(qtyRaw);
+    const precio = stripLeadZeros(precioRaw);
+    
+    // valor: elimina ceros a la izquierda solo del primer grupo (018.000 -> 18.000)
+    const valor = String(valorRaw || "").replace(/^0+(?=\d)/, "");
 
     // 3) Descripción = todo lo anterior al tail
     const tailFull = mTail[0]; // incluye espacios
@@ -547,6 +552,7 @@ app.post("/api/upload-pdf", upload.single("pdf"), async (req, res) => {
 // Render: usar el puerto que te asigna la plataforma
 const PORT = process.env.PORT || 5050;
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
+
 
 
 
