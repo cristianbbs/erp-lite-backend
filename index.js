@@ -25,13 +25,13 @@ const upload = multer({
 });
 
 /* =========================
-   UTILIDADES
+   PARSER ROBUSTO
 ========================= */
 
 function normalizeText(t) {
   return (t || "")
     .replace(/\r/g, "\n")
-    .replace(/\u00A0/g, " ")
+    .replace(/\u00A0/g, " ") // no-break space
     .replace(/[ \t]+/g, " ")
     .replace(/\n{2,}/g, "\n")
     .trim();
@@ -52,10 +52,11 @@ function cleanValue(v) {
   );
 }
 
+// Si el valor trae etiquetas pegadas, cortamos al empezar una etiqueta conocida
 function stripTrailingLabels(value) {
   if (!value) return value;
   const stopRe =
-    /\b(CONTACTO|GIRO|DIRECCI[ÓO]N|COMUNA|CIUDAD|FECHA\s+EMISI[ÓO]N|MONTO\s+NETO|I\.V\.A\.|TOTAL|REFERENCIAS|CODIGO|DESCRIPCION)\b/i;
+    /\b(CONTACTO|GIRO|DIRECCI[ÓO]N|COMUNA|CIUDAD|FECHA\s+EMISI[ÓO]N|MONTO\s+NETO|I\.V\.A\.|TOTAL|REFERENCIAS|FORMA\s+DE\s+PAGO)\b/i;
   const idx = value.search(stopRe);
   if (idx > 0) return value.slice(0, idx).trim();
   return value.trim();
@@ -72,12 +73,19 @@ function keepFirstPageOnly(text) {
   return t.slice(0, secondIdx).trim();
 }
 
+/**
+ * Encuentra valor asociado a etiqueta (muy tolerante)
+ * - ":" opcional
+ * - valor misma línea o siguiente
+ * - limpia ":" y corta si vienen etiquetas pegadas
+ */
 function pickAfterLabel(text, labelVariants) {
   const t = text || "";
 
   for (const label of labelVariants) {
     const L = escRe(label);
 
+    // Caso 1: misma línea
     const reSameLine = new RegExp(`(?:^|\\n)\\s*${L}\\s*:??\\s*(.+)`, "i");
     const m1 = t.match(reSameLine);
     if (m1 && m1[1]) {
@@ -86,6 +94,7 @@ function pickAfterLabel(text, labelVariants) {
       if (v && v !== "-" && v !== "—") return v;
     }
 
+    // Caso 2: línea siguiente
     const reNextLine = new RegExp(
       `(?:^|\\n)\\s*${L}\\s*:??\\s*\\n\\s*([^\\n]+)`,
       "i"
@@ -98,6 +107,7 @@ function pickAfterLabel(text, labelVariants) {
     }
   }
 
+  // Caso 3 fallback: chunk cercano
   for (const label of labelVariants) {
     const idx = t.toUpperCase().indexOf(label.toUpperCase());
     if (idx !== -1) {
@@ -153,35 +163,44 @@ function parseReferences(text) {
     .map((l) => l.replace(/^-+\s*/, ""));
 }
 
+// Fallback: detecta un RUT por patrón
 function findRutByPattern(text) {
   const t = text || "";
   const m = t.match(/\b\d{1,2}\.?\d{3}\.?\d{3}-[0-9Kk]\b/);
   return m ? cleanValue(m[0].replace(/\./g, "")) : null;
 }
 
+/**
+ * Extrae un bloque “de ubicación”
+ */
 function getLocationBlock(text) {
   const t = text || "";
   const start = t.search(/DIRECCI[ÓO]N/i);
   if (start === -1) return t;
 
   const after = t.slice(start);
-  const stop = after.search(/\n(Fecha\s+Emisi[óo]n|MONTO\s+NETO|Codigo\s+Descripcion)\b/i);
+  const stop = after.search(
+    /\n(Fecha\s+Emisi[óo]n|MONTO\s+NETO|Codigo\s+Descripcion)\b/i
+  );
   const block = stop === -1 ? after.slice(0, 450) : after.slice(0, stop);
   return block;
 }
 
+/**
+ * COMUNA/CIUDAD robusto (corta si viene pegado “CIUDAD:STGO”)
+ */
 function extractComunaCiudad(text) {
   const block = getLocationBlock(text);
 
   const cutRe =
-    /(?=\b(CONTACTO|GIRO|DIRECCI[ÓO]N|FECHA\s+EMISI[ÓO]N|MONTO\s+NETO|TOTAL|I\.V\.A\.|CODIGO|DESCRIPCION)\b)/i;
+    /(?=\b(CONTACTO|GIRO|DIRECCI[ÓO]N|FECHA\s+EMISI[ÓO]N|MONTO\s+NETO|TOTAL|I\.V\.A\.|FORMA\s+DE\s+PAGO)\b)/i;
 
   let comuna = null;
   {
     const m = block.match(/COMUNA\s*:?\s*([\s\S]{0,160})/i);
     if (m && m[1]) {
       let v = m[1].split(cutRe)[0];
-      v = v.split(/CIUDAD\s*:?/i)[0];
+      v = v.split(/CIUDAD\s*:?/i)[0]; // corta aunque venga pegado
       comuna = cleanValue(v);
     }
   }
@@ -200,135 +219,129 @@ function extractComunaCiudad(text) {
 }
 
 /* =========================
-   ITEMS (RECONSTRUCCIÓN)
-   - Código puede venir en una línea y números en la siguiente
-   - Usamos 1-2 líneas “buffer” pero cortamos SI aparece etiqueta o nuevo código
+   ITEMS (ROBUSTO + FIX CODIGO PARTIDO)
 ========================= */
 
-function splitPackedQtyPriceValue(token) {
-  // 4045018.000 => 40 / 450 / 18.000
-  const m = token.match(/^(\d+)(\d{2,4})(\d{1,3}(?:\.\d{3})+)$/);
-  if (!m) return null;
-  return { qty: m[1], unit: null, price: m[2], value: m[3] };
-}
-
-function normalizeQtyToNumberString(qtyRaw) {
-  if (!qtyRaw) return null;
-  return String(qtyRaw).replace(/\./g, "");
-}
-
-function parseRowTailFromTokens(tokens) {
-  // tokens: parte “cola” de item (puede venir de 1 o 2 líneas)
-  // Casos:
-  // - qty unit price value  (1.400 KG 285 399.000)
-  // - qty price value       (40 450 18.000)
-  // - packed last token     (4045018.000)
-  if (!tokens.length) return null;
-
-  const last = tokens[tokens.length - 1];
-  const packed = splitPackedQtyPriceValue(last);
-  if (packed) return packed;
-
-  // qty unit price value
-  let m = tokens.join(" ").match(
-    /(\d[\d\.]*)\s+([A-Za-zÁÉÍÓÚÑñ\.]{1,10})\s+(\d[\d\.]*)\s+(\d[\d\.]*)\s*$/
-  );
-  if (m) {
-    return { qty: m[1], unit: m[2], price: m[3], value: m[4] };
-  }
-
-  // qty price value
-  m = tokens.join(" ").match(/(\d[\d\.]*)\s+(\d[\d\.]*)\s+(\d[\d\.]*)\s*$/);
-  if (m) {
-    return { qty: m[1], unit: null, price: m[2], value: m[3] };
-  }
-
-  return null;
+/**
+ * Une códigos rotos tipo:
+ *  - "HP-\n02" -> "HP-02"
+ *  - "HP- 02"  -> "HP-02"
+ *  - "HP -02"  -> "HP-02"
+ */
+function repairBrokenCodes(s) {
+  return (s || "").replace(/([A-Z]{2})\s*-\s*(\d{1,4})/g, "$1-$2");
 }
 
 function parseItems(text) {
-  const t = (text || "")
+  let t = (text || "")
     .replace(/\r/g, "\n")
     .replace(/\u00A0/g, " ")
     .replace(/[ \t]+/g, " ")
     .replace(/\n{2,}/g, "\n");
 
-  // Detecta códigos tipo: HP-02 / HC-101 pero tolera espacios alrededor del guion
-  // Captura: "HP-02", "HP - 02", "HP- 02", "HP -02"
-  const codeRe = /(^|\s)([A-Z]{2})\s*-\s*([0-9]{1,4})(?=\s|$)/g;
+  // FIX CLAVE: repara códigos partidos
+  t = repairBrokenCodes(t);
 
-  const stopRe = /\b(Referencias:|MONTO\s+NETO|I\.V\.A\.|TOTAL)\b/i;
+  // Código real de producto: 2 letras + "-" + 1-4 dígitos
+  // (SIN \b al final para permitir "HP-02HIELO" pegado)
+  const codeReGlobal = /\b([A-Z]{2}-\d{1,4})/g;
+  const codeReOne = /\b([A-Z]{2}-\d{1,4})/;
 
-  const firstCode = t.search(codeRe);
+  // Cortes típicos donde ya NO hay ítems
+  const stopRe = /\b(Referencias:|Forma de Pago:|MONTO NETO|I\.V\.A\.|TOTAL)\b/i;
+
+  const firstCode = t.search(codeReOne);
   if (firstCode === -1) return [];
 
   let working = t.slice(firstCode);
   const stop = working.search(stopRe);
   if (stop !== -1) working = working.slice(0, stop);
 
-  const matches = [...working.matchAll(codeRe)];
+  const matches = [...working.matchAll(codeReGlobal)];
   if (!matches.length) return [];
 
-  const items = [];
-
-  const isMoneyish = (s) => /^[0-9][0-9\.]*$/.test(s); // 18.000 / 399.000 / 450 / 620
-  const isQty = (s) => /^[0-9][0-9\.]*$/.test(s);      // 40 / 1.400
+  const isMoneyish = (s) => /^[0-9][0-9\.]*$/.test(s); // 18.000 / 399.000 / 450
+  const isQty = (s) => /^[0-9][0-9\.]*$/.test(s); // 40 / 1.400
+  const isUnit = (s) => /^[A-Za-zÁÉÍÓÚÑñ\.]{1,12}$/.test(s); // KG / BOLSAS
 
   const cleanDesc = (s) =>
     (s || "")
       .replace(/\s+/g, " ")
       .trim();
 
+  const items = [];
+
   for (let i = 0; i < matches.length; i++) {
-    const sigla = matches[i][2];         // HP / HC
-    const num = matches[i][3];           // 02 / 101
-    const codigo = `${sigla}-${num}`;
-
+    const code = matches[i][1];
     const start = matches[i].index ?? 0;
-    const end = (i + 1 < matches.length)
-      ? (matches[i + 1].index ?? working.length)
-      : working.length;
+    const end =
+      i + 1 < matches.length ? matches[i + 1].index ?? working.length : working.length;
 
-    // Chunk entre este código y el siguiente
     let chunk = working.slice(start, end);
 
-    // Normaliza para tokenizar mejor
+    // normaliza y repara de nuevo por si el chunk viene raro
+    chunk = repairBrokenCodes(chunk);
     chunk = chunk.replace(/\n/g, " ").replace(/\s+/g, " ").trim();
 
-    // Quita el código del inicio (todas sus variantes con espacios)
-    chunk = chunk.replace(new RegExp(`^${sigla}\\s*-\\s*${num}\\s*`), "");
+    // Quita el código al inicio
+    chunk = chunk.replace(
+      new RegExp("^" + code.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\s*"),
+      ""
+    );
 
+    // tokens
     const tokens = chunk.split(" ").filter(Boolean);
 
-    // Estrategia: buscar al final "precio" y "valor" como números,
-    // y antes una cantidad numérica. (No metemos palabras como "BOLSAS")
-    let idxValor = -1, idxPrecio = -1;
+    // desde el final: valor y precio = dos últimos "moneyish"
+    let idxValor = -1;
+    let idxPrecio = -1;
 
     for (let k = tokens.length - 1; k >= 0; k--) {
       if (isMoneyish(tokens[k])) {
         if (idxValor === -1) idxValor = k;
-        else { idxPrecio = k; break; }
+        else {
+          idxPrecio = k;
+          break;
+        }
       }
     }
 
-    const valor = (idxValor !== -1) ? tokens[idxValor] : null;
-    const precio = (idxPrecio !== -1) ? tokens[idxPrecio] : null;
+    const valor = idxValor !== -1 ? tokens[idxValor] : null;
+    const precio = idxPrecio !== -1 ? tokens[idxPrecio] : null;
 
-    // Cantidad: último número antes del precio/valor
+    // cantidad antes del precio/valor
     let cantidad = null;
-    const limit = (idxPrecio !== -1 ? idxPrecio : idxValor);
+    const limit = idxPrecio !== -1 ? idxPrecio : idxValor;
     if (limit > 0) {
       for (let k = limit - 1; k >= 0; k--) {
-        if (isQty(tokens[k])) { cantidad = tokens[k]; break; }
+        if (isQty(tokens[k])) {
+          const maybeUnit = tokens[k + 1];
+          if (maybeUnit && isUnit(maybeUnit) && k + 1 < limit) {
+            cantidad = `${tokens[k]} ${maybeUnit}`;
+          } else {
+            cantidad = tokens[k];
+          }
+          break;
+        }
       }
     }
 
-    // Descripción: todo antes de la cantidad (si existe),
-    // y si no existe, todo antes del precio/valor.
+    // descripción = todo antes de la cantidad (si existe), o antes de precio/valor
     let descTokens = tokens;
 
     if (cantidad) {
-      const cutIdx = tokens.indexOf(cantidad);
+      const qtyParts = cantidad.split(" ");
+      let cutIdx = -1;
+      for (let k = 0; k < tokens.length; k++) {
+        if (tokens[k] === qtyParts[0]) {
+          if (qtyParts.length === 2) {
+            if (tokens[k + 1] === qtyParts[1]) cutIdx = k;
+          } else {
+            cutIdx = k;
+          }
+          if (cutIdx !== -1) break;
+        }
+      }
       if (cutIdx !== -1) descTokens = tokens.slice(0, cutIdx);
     } else if (idxPrecio !== -1) {
       descTokens = tokens.slice(0, idxPrecio);
@@ -336,18 +349,19 @@ function parseItems(text) {
       descTokens = tokens.slice(0, idxValor);
     }
 
-    // Limpia cosas típicas que se cuelan en descripción
-    const descripcion = cleanDesc(
-      descTokens.join(" ")
-        .replace(/\b(BOLSAS|KG|UN|UND|UNIDAD|KILOGRAMOS)\b/gi, "") // opcional
-    );
+    let descripcion = cleanDesc(descTokens.join(" "));
 
+    // Limpieza de “ruido” típico dentro de la descripción (opcional, pero ayuda)
+    // evita que se pegue "Referencias:" si alcanzó a colarse
+    descripcion = descripcion.replace(/\bReferencias:\b.*$/i, "").trim() || null;
+
+    // Si no hay nada útil, saltar
     if (!descripcion && !cantidad && !precio && !valor) continue;
 
     items.push({
-      codigo,
-      descripcion: descripcion || null,
-      cantidad: cantidad || null, // SOLO número
+      codigo: code,
+      descripcion,
+      cantidad: cantidad || null,
       precio: precio || null,
       valor: valor || null,
     });
@@ -430,12 +444,11 @@ app.post("/api/upload-pdf", upload.single("pdf"), async (req, res) => {
     }
 
     const fields = extractFacturaKolderStyle(text);
-    const preview = text.slice(0, 2500);
 
     return res.json({
       ok: true,
       fields,
-      preview,
+      preview: text.slice(0, 2500),
       meta: { pages: parsed.numpages || null },
     });
   } catch (err) {
@@ -444,6 +457,6 @@ app.post("/api/upload-pdf", upload.single("pdf"), async (req, res) => {
   }
 });
 
+// Render: usar el puerto que te asigna la plataforma
 const PORT = process.env.PORT || 5050;
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
-
