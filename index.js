@@ -75,9 +75,6 @@ function keepFirstPageOnly(text) {
 
 /**
  * Encuentra valor asociado a etiqueta (muy tolerante)
- * - ":" opcional
- * - valor misma línea o siguiente
- * - limpia ":" y corta si vienen etiquetas pegadas
  */
 function pickAfterLabel(text, labelVariants) {
   const t = text || "";
@@ -187,7 +184,7 @@ function getLocationBlock(text) {
 }
 
 /**
- * COMUNA/CIUDAD robusto (corta si viene pegado “CIUDAD:STGO”)
+ * COMUNA/CIUDAD robusto
  */
 function extractComunaCiudad(text) {
   const block = getLocationBlock(text);
@@ -200,7 +197,7 @@ function extractComunaCiudad(text) {
     const m = block.match(/COMUNA\s*:?\s*([\s\S]{0,160})/i);
     if (m && m[1]) {
       let v = m[1].split(cutRe)[0];
-      v = v.split(/CIUDAD\s*:?/i)[0]; // corta aunque venga pegado
+      v = v.split(/CIUDAD\s*:?/i)[0];
       comuna = cleanValue(v);
     }
   }
@@ -222,14 +219,6 @@ function extractComunaCiudad(text) {
    ITEMS
 ========================= */
 
-/**
- * Une códigos rotos tipo:
- *  - "HP-\n02" -> "HP-02"
- *  - "HP- 02"  -> "HP-02"
- *  - "HP -02"  -> "HP-02"
- *  - "HP - 02" -> "HP-02"
- *  - soporte 2-5 letras y 1-5 dígitos
- */
 function repairBrokenCodes(s) {
   return (s || "").replace(/([A-Z]{2,5})\s*-\s*(\d{1,5})/g, "$1-$2");
 }
@@ -254,7 +243,6 @@ function deglueItemTail(line) {
     `(?:^|\\s)(${numRe})\\s*(?:([A-Za-zÁÉÍÓÚÑñ\\.]{1,12})\\s+)?(${numRe})\\s+(${numRe})\\s*$`
   );
 
-  // Si ya está bien separado al final, no tocar
   if (tailOkRe.test(s)) return s;
 
   // Caso especial: dos montos con miles PEGADOS al final -> "... 13.5003.500"
@@ -270,7 +258,6 @@ function deglueItemTail(line) {
 
     let rebuilt;
     if (/TRANSPORTE/i.test(base)) {
-      // Para transporte, forzamos qty=1 y usamos el último monto como precio/valor
       rebuilt = `${base} 1 ${b} ${b}`;
     } else {
       rebuilt = hasQty ? `${base} ${a} ${b}` : `${base} 1 ${a} ${b}`;
@@ -373,12 +360,10 @@ function parseItems(text) {
   const numRe = "\\d{1,3}(?:\\.\\d{3})*|\\d+";
   const unitRe = "[A-Za-zÁÉÍÓÚÑñ\\.]{1,12}";
 
-  // Tail ideal al final
   const tailRe = new RegExp(
     `(?:^|\\s)(${numRe})\\s*(?:(${unitRe})\\s+)?(${numRe})\\s+(${numRe})\\s*$`
   );
 
-  // Fallback: encontrar qty/unit?/precio/valor en cualquier parte (tomamos el ÚLTIMO match)
   const tailFindRe = new RegExp(
     `(${numRe})\\s*(?:(${unitRe})\\s+)?(${numRe})\\s+(${numRe})`,
     "g"
@@ -390,10 +375,59 @@ function parseItems(text) {
       .replace(/\s+/g, " ")
       .trim();
 
-  // Ruido típico que NO debería quedar en descripción (si se cuela)
   const noiseRe = /\b(LOTE|DESDE|HASTA)\s*:?\s*.*$/i;
 
   const stripLeadZeros = (x) => String(x || "").replace(/^0+(?=\d)/, "");
+
+  const toIntCL = (s) => {
+    if (s == null) return NaN;
+    const n = String(s).replace(/\./g, "");
+    const v = parseInt(n, 10);
+    return Number.isFinite(v) ? v : NaN;
+  };
+
+  const formatCL = (n) => {
+    const s = String(Math.trunc(n));
+    // miles con punto
+    return s.replace(/\B(?=(\d{3})+(?!\d))/g, ".");
+  };
+
+  // FIX CLAVE para tu caso:
+  // cuando pdf-parse pega "30" + "1.500" como "301.500"
+  // y/o pega "1" + "5.000" como "15.000"
+  // lo detectamos por consistencia: (cantidad * precio) == valor
+  const fixGluedQtyIntoPrice = (qtyStr, priceStr, valorStr) => {
+    const qtyNum = toIntCL(qtyStr);
+    const valNum = toIntCL(valorStr);
+    if (!Number.isFinite(qtyNum) || !Number.isFinite(valNum) || valNum <= 0) {
+      return null;
+    }
+
+    // sólo aplica si el "precio" tiene formato X.XXX (miles con punto)
+    if (!/^\d{2,3}\.\d{3}$/.test(String(priceStr))) return null;
+
+    const [a, b] = String(priceStr).split(".");
+    if (!a || !b || a.length < 2) return null;
+
+    // split: a="301", b="500" => qtyCand="30", priceCand="1.500" (num=1500)
+    const qtyCandStr = a.slice(0, -1);
+    const priceCandStr = `${a.slice(-1)}.${b}`;
+
+    const qtyCand = toIntCL(qtyCandStr);
+    const priceCand = toIntCL(priceCandStr);
+
+    if (!Number.isFinite(qtyCand) || !Number.isFinite(priceCand)) return null;
+    if (qtyCand <= 0 || priceCand <= 0) return null;
+
+    // validación dura: que cierre con el valor
+    if (qtyCand * priceCand !== valNum) return null;
+
+    return {
+      cantidad: String(qtyCand),
+      precio: formatCL(priceCand),
+      valor: formatCL(valNum),
+    };
+  };
 
   const items = [];
 
@@ -421,7 +455,7 @@ function parseItems(text) {
     let mTail = chunkSan.match(tailRe);
     let lastFound = null;
 
-    // 2) Fallback: buscar el ÚLTIMO patrón dentro del chunk (para PDFs donde el tail no queda al final)
+    // 2) Fallback: buscar el ÚLTIMO patrón dentro del chunk
     if (!mTail) {
       for (const m of chunkSan.matchAll(tailFindRe)) lastFound = m;
       if (lastFound) mTail = lastFound;
@@ -442,13 +476,33 @@ function parseItems(text) {
       continue;
     }
 
-    const qtyRaw = mTail[1];
-    const precioRaw = mTail[3];
-    const valorRaw = mTail[4];
+    let qtyRaw = mTail[1];
+    let precioRaw = mTail[3];
+    let valorRaw = mTail[4];
 
-    const cantidad = stripLeadZeros(qtyRaw);
-    const precio = stripLeadZeros(precioRaw);
-    const valor = String(valorRaw || "").replace(/^0+(?=\d)/, "");
+    let cantidad = stripLeadZeros(qtyRaw);
+    let precio = stripLeadZeros(precioRaw);
+    let valor = String(valorRaw || "").replace(/^0+(?=\d)/, "");
+
+    // ✅ FIX: corrige casos tipo 301.500 (=30 + 1.500) y 15.000 (=1 + 5.000)
+    // usando la igualdad cantidad*precio==valor
+    const fixed = fixGluedQtyIntoPrice(cantidad, precioRaw, valorRaw);
+    if (fixed) {
+      cantidad = fixed.cantidad;
+      precio = fixed.precio;
+      valor = fixed.valor;
+    } else {
+      // normaliza precio/valor en formato CL si vienen sin puntos pero grandes
+      // (no fuerza nada si ya trae puntos)
+      const pNum = toIntCL(precioRaw);
+      const vNum = toIntCL(valorRaw);
+      if (!/\./.test(String(precioRaw)) && Number.isFinite(pNum) && pNum >= 1000) {
+        precio = formatCL(pNum);
+      }
+      if (!/\./.test(String(valorRaw)) && Number.isFinite(vNum) && vNum >= 1000) {
+        valor = formatCL(vNum);
+      }
+    }
 
     // Descripción: cortar antes del match encontrado
     let descPart;
