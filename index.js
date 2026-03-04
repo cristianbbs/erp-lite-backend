@@ -219,7 +219,10 @@ function extractComunaCiudad(text) {
 }
 
 /* =========================
-   ITEMS (ROBUSTO + FIX CODIGO PARTIDO)
+   ITEMS (MUY ROBUSTO)
+   - Ancla cantidad/precio/valor desde el FINAL del ítem
+   - Evita caer en "20 BOLSAS DE 2 KG" como cantidad/precio
+   - cantidad final = SOLO número (sin unidad)
 ========================= */
 
 /**
@@ -227,6 +230,7 @@ function extractComunaCiudad(text) {
  *  - "HP-\n02" -> "HP-02"
  *  - "HP- 02"  -> "HP-02"
  *  - "HP -02"  -> "HP-02"
+ *  - "HP - 02" -> "HP-02"
  */
 function repairBrokenCodes(s) {
   return (s || "").replace(/([A-Z]{2})\s*-\s*(\d{1,4})/g, "$1-$2");
@@ -239,11 +243,10 @@ function parseItems(text) {
     .replace(/[ \t]+/g, " ")
     .replace(/\n{2,}/g, "\n");
 
-  // FIX CLAVE: repara códigos partidos
+  // 1) Reparar códigos partidos
   t = repairBrokenCodes(t);
 
-  // Código real de producto: 2 letras + "-" + 1-4 dígitos
-  // (SIN \b al final para permitir "HP-02HIELO" pegado)
+  // Código de producto (sin \b final para permitir pegado)
   const codeReGlobal = /\b([A-Z]{2}-\d{1,4})/g;
   const codeReOne = /\b([A-Z]{2}-\d{1,4})/;
 
@@ -260,14 +263,26 @@ function parseItems(text) {
   const matches = [...working.matchAll(codeReGlobal)];
   if (!matches.length) return [];
 
-  const isMoneyish = (s) => /^[0-9][0-9\.]*$/.test(s); // 18.000 / 399.000 / 450
-  const isQty = (s) => /^[0-9][0-9\.]*$/.test(s); // 40 / 1.400
-  const isUnit = (s) => /^[A-Za-zÁÉÍÓÚÑñ\.]{1,12}$/.test(s); // KG / BOLSAS
-
   const cleanDesc = (s) =>
     (s || "")
       .replace(/\s+/g, " ")
       .trim();
+
+  // Números tipo Chile: 40, 450, 18.000, 1.400, etc.
+  const numRe = "\\d{1,3}(?:\\.\\d{3})*|\\d+";
+  const unitRe = "[A-Za-zÁÉÍÓÚÑñ\\.]{1,12}";
+
+  // ANCLA DESDE EL FINAL:
+  // ... <cantidad> <unidad opcional> <precio> <valor> (al final del ítem)
+  //
+  // Ej: "40 450 18.000"
+  // Ej: "1.400 KG 285 399.000"
+  const tailRe = new RegExp(
+    `(?:^|\\s)(${numRe})\\s*(?:(${unitRe})\\s+)?(${numRe})\\s+(${numRe})\\s*$`
+  );
+
+  // Ruido típico que NO debería quedar en descripción (si se cuela)
+  const noiseRe = /\b(LOTE|DESDE|HASTA)\s*:?\s*.*$/i;
 
   const items = [];
 
@@ -275,95 +290,62 @@ function parseItems(text) {
     const code = matches[i][1];
     const start = matches[i].index ?? 0;
     const end =
-      i + 1 < matches.length ? matches[i + 1].index ?? working.length : working.length;
+      i + 1 < matches.length
+        ? matches[i + 1].index ?? working.length
+        : working.length;
 
     let chunk = working.slice(start, end);
 
-    // normaliza y repara de nuevo por si el chunk viene raro
+    // normaliza chunk
     chunk = repairBrokenCodes(chunk);
     chunk = chunk.replace(/\n/g, " ").replace(/\s+/g, " ").trim();
 
     // Quita el código al inicio
-    chunk = chunk.replace(
-      new RegExp("^" + code.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\s*"),
-      ""
-    );
+    const codeEsc = code.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    chunk = chunk.replace(new RegExp("^" + codeEsc + "\\s*"), "").trim();
 
-    // tokens
-    const tokens = chunk.split(" ").filter(Boolean);
+    // 2) Extraer tail (cantidad/precio/valor) desde el FINAL del chunk
+    const mTail = chunk.match(tailRe);
 
-    // desde el final: valor y precio = dos últimos "moneyish"
-    let idxValor = -1;
-    let idxPrecio = -1;
-
-    for (let k = tokens.length - 1; k >= 0; k--) {
-      if (isMoneyish(tokens[k])) {
-        if (idxValor === -1) idxValor = k;
-        else {
-          idxPrecio = k;
-          break;
-        }
+    if (!mTail) {
+      // Si no calza, no inventamos valores: lo dejamos como "solo descripción"
+      // (mejor eso que contaminar columnas con números del medio)
+      const descripcion = cleanDesc(chunk.replace(noiseRe, "").trim()) || null;
+      if (descripcion) {
+        items.push({
+          codigo: code,
+          descripcion,
+          cantidad: null,
+          precio: null,
+          valor: null,
+        });
       }
+      continue;
     }
 
-    const valor = idxValor !== -1 ? tokens[idxValor] : null;
-    const precio = idxPrecio !== -1 ? tokens[idxPrecio] : null;
+    const qtyRaw = mTail[1];      // ej: "40" o "1.400"
+    const unit = mTail[2] || "";  // ej: "KG" (opcional)
+    const precioRaw = mTail[3];   // ej: "450" o "285"
+    const valorRaw = mTail[4];    // ej: "18.000" o "399.000"
 
-    // cantidad antes del precio/valor
-    let cantidad = null;
-    const limit = idxPrecio !== -1 ? idxPrecio : idxValor;
-    if (limit > 0) {
-      for (let k = limit - 1; k >= 0; k--) {
-        if (isQty(tokens[k])) {
-          const maybeUnit = tokens[k + 1];
-          if (maybeUnit && isUnit(maybeUnit) && k + 1 < limit) {
-            cantidad = `${tokens[k]} ${maybeUnit}`;
-          } else {
-            cantidad = tokens[k];
-          }
-          break;
-        }
-      }
-    }
+    // Importante: cantidad final SOLO número (sin unidad)
+    const cantidad = qtyRaw;
 
-    // descripción = todo antes de la cantidad (si existe), o antes de precio/valor
-    let descTokens = tokens;
+    // 3) Descripción = todo lo anterior al tail
+    const tailFull = mTail[0]; // incluye espacios
+    let descPart = chunk.slice(0, chunk.length - tailFull.length).trim();
 
-    if (cantidad) {
-      const qtyParts = cantidad.split(" ");
-      let cutIdx = -1;
-      for (let k = 0; k < tokens.length; k++) {
-        if (tokens[k] === qtyParts[0]) {
-          if (qtyParts.length === 2) {
-            if (tokens[k + 1] === qtyParts[1]) cutIdx = k;
-          } else {
-            cutIdx = k;
-          }
-          if (cutIdx !== -1) break;
-        }
-      }
-      if (cutIdx !== -1) descTokens = tokens.slice(0, cutIdx);
-    } else if (idxPrecio !== -1) {
-      descTokens = tokens.slice(0, idxPrecio);
-    } else if (idxValor !== -1) {
-      descTokens = tokens.slice(0, idxValor);
-    }
+    // limpieza de ruido típico en descripción
+    descPart = descPart.replace(noiseRe, "").trim();
 
-    let descripcion = cleanDesc(descTokens.join(" "));
-
-    // Limpieza de “ruido” típico dentro de la descripción (opcional, pero ayuda)
-    // evita que se pegue "Referencias:" si alcanzó a colarse
-    descripcion = descripcion.replace(/\bReferencias:\b.*$/i, "").trim() || null;
-
-    // Si no hay nada útil, saltar
-    if (!descripcion && !cantidad && !precio && !valor) continue;
+    const descripcion = cleanDesc(descPart) || null;
 
     items.push({
       codigo: code,
       descripcion,
-      cantidad: cantidad || null,
-      precio: precio || null,
-      valor: valor || null,
+      cantidad,
+      precio: precioRaw,
+      valor: valorRaw,
     });
   }
 
@@ -460,3 +442,4 @@ app.post("/api/upload-pdf", upload.single("pdf"), async (req, res) => {
 // Render: usar el puerto que te asigna la plataforma
 const PORT = process.env.PORT || 5050;
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
+
