@@ -13,7 +13,15 @@ app.use(
   })
 );
 app.use(express.json());
-
+// Multer en memoria (NO guarda PDF en disco)
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 15 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    const ok = file.mimetype === "application/pdf";
+    cb(ok ? null : new Error("Solo se permiten PDFs"), ok);
+  },
+});
 /* =========================
    USUARIOS Y AUTH
    Contraseñas hasheadas con SHA-256.
@@ -419,4 +427,5 @@ app.post("/api/upload-pdf", authenticate, upload.single("pdf"), async (req, res)
 
 const PORT = process.env.PORT || 5050;
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
+
 
