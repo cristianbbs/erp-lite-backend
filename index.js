@@ -24,9 +24,9 @@ function sha256(s) {
   return crypto.createHash("sha256").update(s).digest("hex");
 }
 
-// Usuarios del sistema. Agregar o quitar según necesites.
 const USERS = [
-  { rut: "12345678-9", passHash: sha256("clave123"), nombre: "Administrador" },
+  { rut: "16088206-9", passHash: sha256("123456Aa-"), nombre: "Cristian" },
+  { rut: "10081284-3", passHash: sha256("123456Bb-"), nombre: "Bernardo" },
 ];
 
 // Tokens activos en memoria: { token -> { rut, nombre, expiresAt } }
@@ -419,3 +419,4 @@ app.post("/api/upload-pdf", authenticate, upload.single("pdf"), async (req, res)
 
 const PORT = process.env.PORT || 5050;
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
+
