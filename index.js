@@ -6,10 +6,12 @@ import pdf from "pdf-parse";
 const app = express();
 
 // CORS: permite tu web
-app.use(cors({
-  origin: ["https://hielokolder.cl", "https://www.hielokolder.cl"],
-  methods: ["GET", "POST", "OPTIONS"],
-}));
+app.use(
+  cors({
+    origin: ["https://hielokolder.cl", "https://www.hielokolder.cl"],
+    methods: ["GET", "POST", "OPTIONS"],
+  })
+);
 app.use(express.json());
 
 // Multer en memoria (NO guarda PDF en disco)
@@ -29,7 +31,7 @@ const upload = multer({
 function normalizeText(t) {
   return (t || "")
     .replace(/\r/g, "\n")
-    .replace(/\u00A0/g, " ")           // no-break space
+    .replace(/\u00A0/g, " ") // no-break space
     .replace(/[ \t]+/g, " ")
     .replace(/\n{2,}/g, "\n")
     .trim();
@@ -41,18 +43,20 @@ function escRe(s) {
 
 function cleanValue(v) {
   if (v == null) return null;
-  return String(v)
-    .replace(/^[\s.:;-]+/, "")      // quita :, ., ;, - al inicio
-    .replace(/[\s.:;-]+$/, "")      // quita al final
-    .replace(/\s{2,}/g, " ")
-    .trim() || null;
+  return (
+    String(v)
+      .replace(/^[\s.:;-]+/, "")
+      .replace(/[\s.:;-]+$/, "")
+      .replace(/\s{2,}/g, " ")
+      .trim() || null
+  );
 }
 
 // Si el valor trae etiquetas pegadas, cortamos al empezar una etiqueta conocida
 function stripTrailingLabels(value) {
   if (!value) return value;
-
-  const stopRe = /\b(CONTACTO|GIRO|DIRECCI[ÓO]N|COMUNA|CIUDAD|FECHA\s+EMISI[ÓO]N|MONTO\s+NETO|I\.V\.A\.|TOTAL|REFERENCIAS)\b/i;
+  const stopRe =
+    /\b(CONTACTO|GIRO|DIRECCI[ÓO]N|COMUNA|CIUDAD|FECHA\s+EMISI[ÓO]N|MONTO\s+NETO|I\.V\.A\.|TOTAL|REFERENCIAS|FORMA\s+DE\s+PAGO)\b/i;
   const idx = value.search(stopRe);
   if (idx > 0) return value.slice(0, idx).trim();
   return value.trim();
@@ -91,7 +95,10 @@ function pickAfterLabel(text, labelVariants) {
     }
 
     // Caso 2: línea siguiente
-    const reNextLine = new RegExp(`(?:^|\\n)\\s*${L}\\s*:??\\s*\\n\\s*([^\\n]+)`, "i");
+    const reNextLine = new RegExp(
+      `(?:^|\\n)\\s*${L}\\s*:??\\s*\\n\\s*([^\\n]+)`,
+      "i"
+    );
     const m2 = t.match(reNextLine);
     if (m2 && m2[1]) {
       let v = cleanValue(m2[1]);
@@ -100,11 +107,11 @@ function pickAfterLabel(text, labelVariants) {
     }
   }
 
-  // Caso 3 fallback: chunk cercano (por si el PDF mete saltos raros)
+  // Caso 3 fallback: chunk cercano
   for (const label of labelVariants) {
     const idx = t.toUpperCase().indexOf(label.toUpperCase());
     if (idx !== -1) {
-      const chunk = t.slice(idx, idx + 180);
+      const chunk = t.slice(idx, idx + 220);
       const after = chunk.split("\n").slice(1).join("\n").trim();
       if (after) {
         let firstLine = cleanValue(after.split("\n")[0]);
@@ -151,12 +158,12 @@ function parseReferences(text) {
 
   return block
     .split("\n")
-    .map(l => l.trim())
-    .filter(l => l.startsWith("-"))
-    .map(l => l.replace(/^-+\s*/, ""));
+    .map((l) => l.trim())
+    .filter((l) => l.startsWith("-"))
+    .map((l) => l.replace(/^-+\s*/, ""));
 }
 
-// Fallback: detecta un RUT por patrón (12.345.678-9 o 12345678-9 o con K)
+// Fallback: detecta un RUT por patrón
 function findRutByPattern(text) {
   const t = text || "";
   const m = t.match(/\b\d{1,2}\.?\d{3}\.?\d{3}-[0-9Kk]\b/);
@@ -164,7 +171,7 @@ function findRutByPattern(text) {
 }
 
 /**
- * Extrae un bloque de texto “de ubicación”
+ * Extrae un bloque “de ubicación”
  */
 function getLocationBlock(text) {
   const t = text || "";
@@ -172,8 +179,10 @@ function getLocationBlock(text) {
   if (start === -1) return t;
 
   const after = t.slice(start);
-  const stop = after.search(/\n(Fecha\s+Emisi[óo]n|MONTO\s+NETO|Codigo\s+Descripcion)\b/i);
-  const block = stop === -1 ? after.slice(0, 350) : after.slice(0, stop);
+  const stop = after.search(
+    /\n(Fecha\s+Emisi[óo]n|MONTO\s+NETO|Codigo\s+Descripcion)\b/i
+  );
+  const block = stop === -1 ? after.slice(0, 450) : after.slice(0, stop);
   return block;
 }
 
@@ -183,21 +192,22 @@ function getLocationBlock(text) {
 function extractComunaCiudad(text) {
   const block = getLocationBlock(text);
 
-  const cutRe = /(?=\b(CONTACTO|GIRO|DIRECCI[ÓO]N|FECHA\s+EMISI[ÓO]N|MONTO\s+NETO|TOTAL|I\.V\.A\.)\b)/i;
+  const cutRe =
+    /(?=\b(CONTACTO|GIRO|DIRECCI[ÓO]N|FECHA\s+EMISI[ÓO]N|MONTO\s+NETO|TOTAL|I\.V\.A\.|FORMA\s+DE\s+PAGO)\b)/i;
 
   let comuna = null;
   {
-    const m = block.match(/COMUNA\s*:?\s*([\s\S]{0,120})/i);
+    const m = block.match(/COMUNA\s*:?\s*([\s\S]{0,160})/i);
     if (m && m[1]) {
       let v = m[1].split(cutRe)[0];
-      v = v.split(/CIUDAD\s*:?/i)[0]; // <-- CLAVE: corta aunque venga pegado
+      v = v.split(/CIUDAD\s*:?/i)[0]; // corta aunque venga pegado
       comuna = cleanValue(v);
     }
   }
 
   let ciudad = null;
   {
-    const m = block.match(/CIUDAD\s*:?\s*([\s\S]{0,120})/i);
+    const m = block.match(/CIUDAD\s*:?\s*([\s\S]{0,160})/i);
     if (m && m[1]) {
       let v = m[1].split(cutRe)[0];
       v = v.split(/\bCONTACTO\b/i)[0];
@@ -209,82 +219,80 @@ function extractComunaCiudad(text) {
 }
 
 /* =========================
-   ITEMS (NUEVO ROBUSTO)
-   Soporta:
-   - HC-101 ... 40 450 18.000
-   - HP-02 ... 1.400 KG 285 399.000
-   - Descripción en varias líneas
+   ITEMS (ROBUSTO + FIX CODIGO PARTIDO)
 ========================= */
 
+/**
+ * Une códigos rotos tipo:
+ *  - "HP-\n02" -> "HP-02"
+ *  - "HP- 02"  -> "HP-02"
+ *  - "HP -02"  -> "HP-02"
+ */
+function repairBrokenCodes(s) {
+  return (s || "").replace(/([A-Z]{2})\s*-\s*(\d{1,4})/g, "$1-$2");
+}
+
 function parseItems(text) {
-  const t = (text || "")
+  let t = (text || "")
     .replace(/\r/g, "\n")
     .replace(/\u00A0/g, " ")
     .replace(/[ \t]+/g, " ")
     .replace(/\n{2,}/g, "\n");
 
-  // Código tipo HC-101 / HP-02 / etc.
-  const codeRe = /\b([A-Z]{2}-\d{1,4})\b/g;
+  // FIX CLAVE: repara códigos partidos
+  t = repairBrokenCodes(t);
+
+  // Código real de producto: 2 letras + "-" + 1-4 dígitos
+  // (SIN \b al final para permitir "HP-02HIELO" pegado)
+  const codeReGlobal = /\b([A-Z]{2}-\d{1,4})/g;
+  const codeReOne = /\b([A-Z]{2}-\d{1,4})/;
 
   // Cortes típicos donde ya NO hay ítems
-  const stopRe = /\b(Referencias:|MONTO NETO|I\.V\.A\.|TOTAL)\b/i;
+  const stopRe = /\b(Referencias:|Forma de Pago:|MONTO NETO|I\.V\.A\.|TOTAL)\b/i;
 
-  // Toma solo desde el primer código hasta antes de montos/referencias (si existe)
-  let working = t;
-  const firstCode = working.search(codeRe);
+  const firstCode = t.search(codeReOne);
   if (firstCode === -1) return [];
 
-  working = working.slice(firstCode);
+  let working = t.slice(firstCode);
   const stop = working.search(stopRe);
   if (stop !== -1) working = working.slice(0, stop);
 
-  // Encuentra todas las posiciones de códigos
-  const matches = [...working.matchAll(codeRe)];
+  const matches = [...working.matchAll(codeReGlobal)];
   if (!matches.length) return [];
 
-  // Helpers
+  const isMoneyish = (s) => /^[0-9][0-9\.]*$/.test(s); // 18.000 / 399.000 / 450
+  const isQty = (s) => /^[0-9][0-9\.]*$/.test(s); // 40 / 1.400
+  const isUnit = (s) => /^[A-Za-zÁÉÍÓÚÑñ\.]{1,12}$/.test(s); // KG / BOLSAS
+
   const cleanDesc = (s) =>
     (s || "")
       .replace(/\s+/g, " ")
       .trim();
-
-  const isMoneyish = (s) => /^[0-9][0-9\.]*$/.test(s);      // 18.000 / 399.000 / 450 / 620
-  const isQty = (s) => /^[0-9][0-9\.]*$/.test(s);          // 40 / 1.400
-  const isUnit = (s) => /^[A-Za-zÁÉÍÓÚÑñ\.]{1,10}$/.test(s); // KG / UN / etc.
 
   const items = [];
 
   for (let i = 0; i < matches.length; i++) {
     const code = matches[i][1];
     const start = matches[i].index ?? 0;
-    const end = (i + 1 < matches.length) ? (matches[i + 1].index ?? working.length) : working.length;
+    const end =
+      i + 1 < matches.length ? matches[i + 1].index ?? working.length : working.length;
 
-    // Bloque del ítem (texto entre este código y el siguiente código)
     let chunk = working.slice(start, end);
 
-    // Normaliza el chunk
+    // normaliza y repara de nuevo por si el chunk viene raro
+    chunk = repairBrokenCodes(chunk);
     chunk = chunk.replace(/\n/g, " ").replace(/\s+/g, " ").trim();
 
-    // Quita el código al inicio para quedarnos con el resto
-    chunk = chunk.replace(new RegExp("^" + code.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\s*"), "");
+    // Quita el código al inicio
+    chunk = chunk.replace(
+      new RegExp("^" + code.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\s*"),
+      ""
+    );
 
-    // Tokeniza
+    // tokens
     const tokens = chunk.split(" ").filter(Boolean);
 
-    // Heurística:
-    // Al final suelen venir: cantidad [unidad] precio valor
-    // - Caso A: "40 450 18.000"
-    // - Caso B: "1.400 KG 285 399.000"
-    // - Algunas facturas meten "Adic." "%Desc." en medio, pero al final igual está el valor.
-    //
-    // Estrategia: desde el final, busca los últimos 2 "moneyish" como precio y valor,
-    // y antes de eso busca cantidad + unidad opcional.
-
-    let valor = null;
-    let precio = null;
-    let cantidad = null;
-
-    // 1) Encuentra desde el final los 2 últimos números tipo dinero
+    // desde el final: valor y precio = dos últimos "moneyish"
     let idxValor = -1;
     let idxPrecio = -1;
 
@@ -298,20 +306,17 @@ function parseItems(text) {
       }
     }
 
-    if (idxValor !== -1) valor = tokens[idxValor];
-    if (idxPrecio !== -1) precio = tokens[idxPrecio];
+    const valor = idxValor !== -1 ? tokens[idxValor] : null;
+    const precio = idxPrecio !== -1 ? tokens[idxPrecio] : null;
 
-    // 2) Cantidad: busca hacia atrás antes de idxPrecio (o idxValor si no hay precio)
-    const limit = (idxPrecio !== -1 ? idxPrecio : idxValor);
+    // cantidad antes del precio/valor
+    let cantidad = null;
+    const limit = idxPrecio !== -1 ? idxPrecio : idxValor;
     if (limit > 0) {
-      // patrones:
-      // - qty unit (ej: 1.400 KG)
-      // - qty (ej: 40)
-      // Tomamos el último qty antes del precio/valor
       for (let k = limit - 1; k >= 0; k--) {
         if (isQty(tokens[k])) {
           const maybeUnit = tokens[k + 1];
-          if (maybeUnit && isUnit(maybeUnit) && (k + 1) < limit) {
+          if (maybeUnit && isUnit(maybeUnit) && k + 1 < limit) {
             cantidad = `${tokens[k]} ${maybeUnit}`;
           } else {
             cantidad = tokens[k];
@@ -321,12 +326,11 @@ function parseItems(text) {
       }
     }
 
-    // 3) Descripción = todo lo anterior a la cantidad (si encontramos cantidad)
+    // descripción = todo antes de la cantidad (si existe), o antes de precio/valor
     let descTokens = tokens;
+
     if (cantidad) {
-      // si cantidad es "1.400 KG" ocupa 2 tokens; si es "40" 1 token
       const qtyParts = cantidad.split(" ");
-      // busca dónde aparece la cantidad en tokens para cortar descripción antes
       let cutIdx = -1;
       for (let k = 0; k < tokens.length; k++) {
         if (tokens[k] === qtyParts[0]) {
@@ -335,26 +339,28 @@ function parseItems(text) {
           } else {
             cutIdx = k;
           }
+          if (cutIdx !== -1) break;
         }
-        if (cutIdx !== -1) break;
       }
       if (cutIdx !== -1) descTokens = tokens.slice(0, cutIdx);
     } else if (idxPrecio !== -1) {
-      // fallback: si hay precio, desc antes del precio
       descTokens = tokens.slice(0, idxPrecio);
     } else if (idxValor !== -1) {
-      // fallback: desc antes del valor
       descTokens = tokens.slice(0, idxValor);
     }
 
-    const descripcion = cleanDesc(descTokens.join(" "));
+    let descripcion = cleanDesc(descTokens.join(" "));
 
-    // Si no hay nada útil, lo saltamos
+    // Limpieza de “ruido” típico dentro de la descripción (opcional, pero ayuda)
+    // evita que se pegue "Referencias:" si alcanzó a colarse
+    descripcion = descripcion.replace(/\bReferencias:\b.*$/i, "").trim() || null;
+
+    // Si no hay nada útil, saltar
     if (!descripcion && !cantidad && !precio && !valor) continue;
 
     items.push({
       codigo: code,
-      descripcion: descripcion || null,
+      descripcion,
       cantidad: cantidad || null,
       precio: precio || null,
       valor: valor || null,
@@ -374,7 +380,12 @@ function extractFacturaKolderStyle(fullText) {
   const tipo_documento = pickDocType(text);
   const numero_documento = pickDocNumber(text);
 
-  const razon_social = pickAfterLabel(text, ["SEÑOR(ES)", "SEÑOR (ES)", "SEÑOR(ES):", "SEÑOR (ES):"]);
+  const razon_social = pickAfterLabel(text, [
+    "SEÑOR(ES)",
+    "SEÑOR (ES)",
+    "SEÑOR(ES):",
+    "SEÑOR (ES):",
+  ]);
 
   let rut = pickAfterLabel(text, ["RUT", "RUT:", "R.U.T", "R.U.T.", "R.U.T:", "R.U.T.:"]);
   if (!rut) rut = findRutByPattern(text);
@@ -433,12 +444,11 @@ app.post("/api/upload-pdf", upload.single("pdf"), async (req, res) => {
     }
 
     const fields = extractFacturaKolderStyle(text);
-    const preview = text.slice(0, 2500);
 
     return res.json({
       ok: true,
       fields,
-      preview,
+      preview: text.slice(0, 2500),
       meta: { pages: parsed.numpages || null },
     });
   } catch (err) {
@@ -450,5 +460,3 @@ app.post("/api/upload-pdf", upload.single("pdf"), async (req, res) => {
 // Render: usar el puerto que te asigna la plataforma
 const PORT = process.env.PORT || 5050;
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
-
-
