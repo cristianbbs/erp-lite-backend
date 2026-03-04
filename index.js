@@ -23,14 +23,14 @@ const upload = multer({
 });
 
 /* =========================
-   PARSER ROBUSTO
+   PARSER ROBUSTO (FIX COMUNA/CIUDAD/CONTACTO)
 ========================= */
 
 function normalizeText(t) {
   return (t || "")
     .replace(/\r/g, "\n")
+    .replace(/\u00A0/g, " ")           // no-break space
     .replace(/[ \t]+/g, " ")
-    .replace(/\u00A0/g, " ")           // espacios no-break
     .replace(/\n{2,}/g, "\n")
     .trim();
 }
@@ -38,15 +38,32 @@ function normalizeText(t) {
 function escRe(s) {
   return (s || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
+
 function cleanValue(v) {
   if (v == null) return null;
   return String(v)
-    .replace(/^[\s.:;-]+/, "")   // quita :, ., ;, - al inicio
-    .replace(/[\s.:;-]+$/, "")   // quita al final
+    .replace(/^[\s.:;-]+/, "")      // quita :, ., ;, - al inicio
+    .replace(/[\s.:;-]+$/, "")      // quita al final
     .replace(/\s{2,}/g, " ")
     .trim() || null;
 }
-// Toma primera página aproximada si el PDF repite encabezado
+
+// Si el valor trae etiquetas pegadas, cortamos al empezar una etiqueta conocida
+function stripTrailingLabels(value) {
+  if (!value) return value;
+
+  // etiquetas típicas que se “pegan” en el texto extraído
+  const stopRe = /\b(CONTACTO|GIRO|DIRECCI[ÓO]N|COMUNA|CIUDAD|FECHA\s+EMISI[ÓO]N|MONTO\s+NETO|I\.V\.A\.|TOTAL|REFERENCIAS)\b/i;
+  const m = value.match(stopRe);
+  if (!m) return value;
+
+  // si aparece una etiqueta a mitad del string, cortamos ahí
+  const idx = value.search(stopRe);
+  if (idx > 0) return value.slice(0, idx).trim();
+  return value.trim();
+}
+
+// Toma primera página si el PDF repite encabezado
 function keepFirstPageOnly(text) {
   const t = text || "";
   const re = /SEÑOR\s*\(ES\)\s*:?\s*/gi;
@@ -58,10 +75,10 @@ function keepFirstPageOnly(text) {
 }
 
 /**
- * Encuentra el valor asociado a una etiqueta (muy tolerante):
- * - acepta ":" opcional
- * - si el valor no está en la misma línea, toma la siguiente línea no vacía
- * - si el PDF parte el texto, también intenta una búsqueda "suave"
+ * Encuentra valor asociado a etiqueta (muy tolerante)
+ * - ":" opcional
+ * - valor misma línea o siguiente
+ * - limpia ":" y corta si vienen etiquetas pegadas
  */
 function pickAfterLabel(text, labelVariants) {
   const t = text || "";
@@ -70,32 +87,33 @@ function pickAfterLabel(text, labelVariants) {
     const L = escRe(label);
 
     // Caso 1: misma línea
-    // (?:^|\n) LABEL : valor
     const reSameLine = new RegExp(`(?:^|\\n)\\s*${L}\\s*:??\\s*(.+)`, "i");
     const m1 = t.match(reSameLine);
     if (m1 && m1[1]) {
-    const v = cleanValue(m1[1]);
-    if (v && v !== "-" && v !== "—") return v;
+      let v = cleanValue(m1[1]);
+      v = stripTrailingLabels(v);
+      if (v && v !== "-" && v !== "—") return v;
     }
 
     // Caso 2: línea siguiente
     const reNextLine = new RegExp(`(?:^|\\n)\\s*${L}\\s*:??\\s*\\n\\s*([^\\n]+)`, "i");
     const m2 = t.match(reNextLine);
     if (m2 && m2[1]) {
-    const v = cleanValue(m2[1]);
-    if (v && v !== "-" && v !== "—") return v;
+      let v = cleanValue(m2[1]);
+      v = stripTrailingLabels(v);
+      if (v && v !== "-" && v !== "—") return v;
     }
   }
 
-  // Caso 3 (fallback): búsqueda suave por si el PDF mete saltos raros
-  // Busca "LABEL" y toma los siguientes 80 caracteres, y saca la primera línea útil
+  // Caso 3 fallback: chunk cercano (por si el PDF mete saltos raros)
   for (const label of labelVariants) {
     const idx = t.toUpperCase().indexOf(label.toUpperCase());
     if (idx !== -1) {
-      const chunk = t.slice(idx, idx + 120);
+      const chunk = t.slice(idx, idx + 180);
       const after = chunk.split("\n").slice(1).join("\n").trim();
       if (after) {
-        const firstLine = after.split("\n")[0].trim();
+        let firstLine = cleanValue(after.split("\n")[0]);
+        firstLine = stripTrailingLabels(firstLine);
         if (firstLine && firstLine !== "-" && firstLine !== "—") return firstLine;
       }
     }
@@ -118,7 +136,7 @@ function pickDocNumber(text) {
 
 function pickFechaEmision(text) {
   const m = (text || "").match(/Fecha\s+Emisi[óo]n\s*:?\s*(.+)/i);
-  return m ? m[1].trim() : null;
+  return m ? cleanValue(m[1]) : null;
 }
 
 function parseMoneyLine(text, labelRegex) {
@@ -204,6 +222,57 @@ function findRutByPattern(text) {
   return m ? cleanValue(m[0].replace(/\./g, "")) : null;
 }
 
+/**
+ * Extrae un bloque de texto “de ubicación” para no capturar de más.
+ * Buscamos desde "DIRECCION" hasta antes de "Fecha Emision" o "MONTO NETO" o "Codigo Descripcion".
+ */
+function getLocationBlock(text) {
+  const t = text || "";
+  const start = t.search(/DIRECCI[ÓO]N/i);
+  if (start === -1) return t;
+
+  const after = t.slice(start);
+  const stop = after.search(/\n(Fecha\s+Emisi[óo]n|MONTO\s+NETO|Codigo\s+Descripcion)\b/i);
+  const block = stop === -1 ? after.slice(0, 350) : after.slice(0, stop);
+  return block;
+}
+
+/**
+ * Extrae COMUNA y CIUDAD sin pegar etiquetas (corta en CONTACTO/GIRO/etc).
+ * Funciona aunque venga “COMUNA QUILICURA CIUDAD:SANTIAGO CONTACTO:JAVIERA”.
+ */
+function extractComunaCiudad(text) {
+  const block = getLocationBlock(text);
+
+  const cutRe = /(?=\b(CONTACTO|GIRO|DIRECCI[ÓO]N|FECHA\s+EMISI[ÓO]N|MONTO\s+NETO|TOTAL|I\.V\.A\.)\b)/i;
+
+  // COMUNA ...
+  let comuna = null;
+  {
+    const m = block.match(/COMUNA\s*:?\s*([\s\S]{0,80})/i);
+    if (m && m[1]) {
+      let v = m[1].split(cutRe)[0]; // corta al aparecer otra etiqueta
+      // si también contiene "CIUDAD" pegado, cortamos antes
+      v = v.split(/\bCIUDAD\b/i)[0];
+      comuna = cleanValue(v);
+    }
+  }
+
+  // CIUDAD ...
+  let ciudad = null;
+  {
+    const m = block.match(/CIUDAD\s*:?\s*([\s\S]{0,80})/i);
+    if (m && m[1]) {
+      let v = m[1].split(cutRe)[0];
+      // si contiene "CONTACTO" pegado, cortamos antes
+      v = v.split(/\bCONTACTO\b/i)[0];
+      ciudad = cleanValue(v);
+    }
+  }
+
+  return { comuna, ciudad };
+}
+
 function extractFacturaKolderStyle(fullText) {
   const text = keepFirstPageOnly(normalizeText(fullText));
 
@@ -211,6 +280,7 @@ function extractFacturaKolderStyle(fullText) {
   const numero_documento = pickDocNumber(text);
 
   const razon_social = pickAfterLabel(text, ["SEÑOR(ES)", "SEÑOR (ES)", "SEÑOR(ES):", "SEÑOR (ES):"]);
+
   let rut = pickAfterLabel(text, ["RUT", "RUT:", "R.U.T", "R.U.T.", "R.U.T:", "R.U.T.:"]);
   if (!rut) rut = findRutByPattern(text);
 
@@ -219,19 +289,8 @@ function extractFacturaKolderStyle(fullText) {
   const contacto = pickAfterLabel(text, ["CONTACTO", "CONTACTO:"]);
   const fecha_emision = pickFechaEmision(text);
 
-  // COMUNA / CIUDAD: juntas o separadas
-  let comuna = null, ciudad = null;
-
-  // Caso 1: misma línea
-  let mLoc = text.match(/COMUNA\s*:?\s*(.+?)\s+CIUDAD\s*:?\s*(.+)/i);
-  if (mLoc) {
-    comuna = mLoc[1].trim();
-    ciudad = mLoc[2].trim();
-  } else {
-    // Caso 2: separadas
-    comuna = pickAfterLabel(text, ["COMUNA", "COMUNA:"]);
-    ciudad = pickAfterLabel(text, ["CIUDAD", "CIUDAD:"]);
-  }
+  // FIX: comuna/ciudad robusto, sin “pegote”
+  const { comuna, ciudad } = extractComunaCiudad(text);
 
   const items = parseItems(text);
   const referencias = parseReferences(text);
@@ -280,7 +339,7 @@ app.post("/api/upload-pdf", upload.single("pdf"), async (req, res) => {
     }
 
     const fields = extractFacturaKolderStyle(text);
-    const preview = text.slice(0, 2000);
+    const preview = text.slice(0, 2500);
 
     return res.json({
       ok: true,
@@ -297,4 +356,3 @@ app.post("/api/upload-pdf", upload.single("pdf"), async (req, res) => {
 // Render: usar el puerto que te asigna la plataforma
 const PORT = process.env.PORT || 5050;
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
-
