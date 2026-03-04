@@ -235,7 +235,67 @@ function extractComunaCiudad(text) {
 function repairBrokenCodes(s) {
   return (s || "").replace(/([A-Z]{2})\s*-\s*(\d{1,4})/g, "$1-$2");
 }
+function deglueItemTail(line) {
+  let s = (line || "").trim();
 
+  // 1) Inserta espacios entre número<->letra (ej: "1.400KG" -> "1.400 KG")
+  s = s
+    .replace(/(\d)([A-Za-zÁÉÍÓÚÑñ])/g, "$1 $2")
+    .replace(/([A-Za-zÁÉÍÓÚÑñ])(\d)/g, "$1 $2")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  // 2) Caso crítico: "4045018.000" (cantidad+precio+valor pegados)
+  //    Detecta un valor al final con formato miles chileno "18.000", "399.000", etc.
+  //    y si antes hay un bloque de dígitos pegados, lo parte en qty + precio.
+  const mVal = s.match(/(\d{1,3}(?:\.\d{3})+)\s*$/);
+  if (!mVal) return s;
+
+  const valor = mVal[1];
+  const idxVal = s.lastIndexOf(valor);
+  const prefix = s.slice(0, idxVal).trim();
+
+  // Si ya hay espacios al final (ej "40 450 "), no hacemos nada.
+  if (/\s$/.test(prefix)) return s;
+
+  // Tomamos el "token" final del prefix (lo que quedó pegado)
+  const mGlue = prefix.match(/(\d+)\s*$/);
+  if (!mGlue) return s;
+
+  const glued = mGlue[1]; // ej: "40450" o "100620"
+  const prePre = prefix.slice(0, prefix.length - glued.length).trim();
+
+  // Heurística: separar glued en [qty][price] probando largos de precio
+  // qty suele ser relativamente "chico", precio suele ser 2-6 dígitos (sin puntos)
+  let best = null;
+
+  for (let priceLen = 2; priceLen <= 6; priceLen++) {
+    if (glued.length <= priceLen) continue;
+
+    const priceDigits = glued.slice(-priceLen);
+    const qtyDigits = glued.slice(0, -priceLen);
+
+    const qty = parseInt(qtyDigits, 10);
+    const price = parseInt(priceDigits, 10);
+
+    if (!Number.isFinite(qty) || !Number.isFinite(price)) continue;
+
+    // filtros razonables (ajusta si tienes casos extremos)
+    if (qty <= 0 || qty > 100000) continue;
+    if (price <= 0 || price > 200000) continue;
+
+    // preferimos qty más corto (ej: 40 en vez de 404)
+    const score = qtyDigits.length * 10 + priceLen;
+    if (!best || score < best.score) {
+      best = { qtyDigits, priceDigits, score };
+    }
+  }
+
+  if (!best) return s;
+
+  const rebuiltTail = `${best.qtyDigits} ${best.priceDigits} ${valor}`;
+  return `${prePre ? prePre + " " : ""}${rebuiltTail}`.trim();
+}
 function parseItems(text) {
   let t = (text || "")
     .replace(/\r/g, "\n")
@@ -299,6 +359,9 @@ function parseItems(text) {
     // normaliza chunk
     chunk = repairBrokenCodes(chunk);
     chunk = chunk.replace(/\n/g, " ").replace(/\s+/g, " ").trim();
+    
+    // FIX: despega el tail cuando viene aplastado (ej 4045018.000)
+    chunk = deglueItemTail(chunk);
 
     // Quita el código al inicio
     const codeEsc = code.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -442,4 +505,5 @@ app.post("/api/upload-pdf", upload.single("pdf"), async (req, res) => {
 // Render: usar el puerto que te asigna la plataforma
 const PORT = process.env.PORT || 5050;
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
+
 
