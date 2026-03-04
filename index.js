@@ -238,63 +238,97 @@ function repairBrokenCodes(s) {
 function deglueItemTail(line) {
   let s = (line || "").trim();
 
-  // 1) Inserta espacios entre número<->letra (ej: "1.400KG" -> "1.400 KG")
+  // Espacios entre número<->letra (ej: "1.400KG" -> "1.400 KG")
   s = s
     .replace(/(\d)([A-Za-zÁÉÍÓÚÑñ])/g, "$1 $2")
     .replace(/([A-Za-zÁÉÍÓÚÑñ])(\d)/g, "$1 $2")
     .replace(/\s+/g, " ")
     .trim();
 
-  // 2) Caso crítico: "4045018.000" (cantidad+precio+valor pegados)
-  //    Detecta un valor al final con formato miles chileno "18.000", "399.000", etc.
-  //    y si antes hay un bloque de dígitos pegados, lo parte en qty + precio.
-  const mVal = s.match(/(\d{1,3}(?:\.\d{3})+)\s*$/);
-  if (!mVal) return s;
+  // Helpers
+  const stripLeadZeros = (x) => {
+    const out = String(x || "").replace(/^0+(?=\d)/, "");
+    return out === "" ? "0" : out;
+  };
 
-  const valor = mVal[1];
-  const idxVal = s.lastIndexOf(valor);
-  const prefix = s.slice(0, idxVal).trim();
+  const numRe = "\\d{1,3}(?:\\.\\d{3})*|\\d+";
+  const tailOkRe = new RegExp(
+    `(?:^|\\s)(${numRe})\\s*(?:([A-Za-zÁÉÍÓÚÑñ\\.]{1,12})\\s+)?(${numRe})\\s+(${numRe})\\s*$`
+  );
 
-  // Si ya hay espacios al final (ej "40 450 "), no hacemos nada.
-  if (/\s$/.test(prefix)) return s;
+  // Si ya está bien separado al final, no tocar
+  if (tailOkRe.test(s)) return s;
 
-  // Tomamos el "token" final del prefix (lo que quedó pegado)
-  const mGlue = prefix.match(/(\d+)\s*$/);
-  if (!mGlue) return s;
+  // Caso: algo termina con ".000" (o ".123") y viene pegado tipo "4045018.000"
+  const m = s.match(/(\d+)(\.\d{3})+\s*$/);
+  if (!m) return s;
 
-  const glued = mGlue[1]; // ej: "40450" o "100620"
-  const prePre = prefix.slice(0, prefix.length - glued.length).trim();
+  const dotsPart = m[0].trim(); // ej "4045018.000"
+  const idxDots = s.lastIndexOf(dotsPart);
+  const beforeAll = s.slice(0, idxDots).trim();
 
-  // Heurística: separar glued en [qty][price] probando largos de precio
-  // qty suele ser relativamente "chico", precio suele ser 2-6 dígitos (sin puntos)
+  // Separa digitsBeforeDot y suffix ".000..."
+  // Para 4045018.000 -> digitsBeforeDot="4045018", suffix=".000"
+  const firstDot = dotsPart.indexOf(".");
+  const digitsBeforeDot = dotsPart.slice(0, firstDot);
+  const suffix = dotsPart.slice(firstDot); // incluye todos los .xxx
+
+  // Vamos a probar valorFirstLen = 1..3 tomando los ÚLTIMOS dígitos antes del punto:
+  // "4045018" -> "8" / "18" / "018"
+  // y ver cuál permite separar el resto en qty+price plausible.
   let best = null;
 
-  for (let priceLen = 2; priceLen <= 6; priceLen++) {
-    if (glued.length <= priceLen) continue;
+  const gluedBase = digitsBeforeDot; // solo dígitos
+  for (let valFirstLen = 1; valFirstLen <= 3; valFirstLen++) {
+    if (gluedBase.length < valFirstLen) continue;
 
-    const priceDigits = glued.slice(-priceLen);
-    const qtyDigits = glued.slice(0, -priceLen);
+    const valFirst = gluedBase.slice(-valFirstLen);
+    const glued = gluedBase.slice(0, -valFirstLen); // lo que queda para qty+price
 
-    const qty = parseInt(qtyDigits, 10);
-    const price = parseInt(priceDigits, 10);
+    // Si no queda nada para qty+price, descartar
+    if (!glued) continue;
 
-    if (!Number.isFinite(qty) || !Number.isFinite(price)) continue;
+    // Separar glued en [qty][price] probando largos de precio
+    for (let priceLen = 2; priceLen <= 6; priceLen++) {
+      if (glued.length <= priceLen) continue;
 
-    // filtros razonables (ajusta si tienes casos extremos)
-    if (qty <= 0 || qty > 100000) continue;
-    if (price <= 0 || price > 200000) continue;
+      const priceDigits = glued.slice(-priceLen);
+      const qtyDigits = glued.slice(0, -priceLen);
 
-    // preferimos qty más corto (ej: 40 en vez de 404)
-    const score = qtyDigits.length * 10 + priceLen;
-    if (!best || score < best.score) {
-      best = { qtyDigits, priceDigits, score };
+      const qty = parseInt(qtyDigits, 10);
+      const price = parseInt(priceDigits, 10);
+
+      if (!Number.isFinite(qty) || !Number.isFinite(price)) continue;
+
+      // Rangos razonables (ajusta si lo necesitas)
+      if (qty <= 0 || qty > 100000) continue;
+      if (price <= 0 || price > 2000000) continue;
+
+      // Valor reconstruido (quita ceros líderes del primer grupo)
+      const valor = `${stripLeadZeros(valFirst)}${suffix}`;
+
+      // Score: preferir qty de 2-4 dígitos y price de 2-5 dígitos
+      // (esto hace que 40/450 gane sobre 4/045)
+      const score =
+        Math.abs(qtyDigits.length - 2) * 10 +
+        Math.abs(priceLen - 3) * 5 +
+        valFirstLen; // leve preferencia por valFirstLen=2 en estos casos
+
+      if (!best || score < best.score) {
+        best = {
+          qtyDigits: stripLeadZeros(qtyDigits),
+          priceDigits: stripLeadZeros(priceDigits),
+          valor,
+          score,
+        };
+      }
     }
   }
 
   if (!best) return s;
 
-  const rebuiltTail = `${best.qtyDigits} ${best.priceDigits} ${valor}`;
-  return `${prePre ? prePre + " " : ""}${rebuiltTail}`.trim();
+  const rebuiltTail = `${best.qtyDigits} ${best.priceDigits} ${best.valor}`.trim();
+  return `${beforeAll ? beforeAll + " " : ""}${rebuiltTail}`.trim();
 }
 function parseItems(text) {
   let t = (text || "")
@@ -505,5 +539,6 @@ app.post("/api/upload-pdf", upload.single("pdf"), async (req, res) => {
 // Render: usar el puerto que te asigna la plataforma
 const PORT = process.env.PORT || 5050;
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
+
 
 
