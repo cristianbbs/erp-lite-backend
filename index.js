@@ -38,7 +38,14 @@ function normalizeText(t) {
 function escRe(s) {
   return (s || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
-
+function cleanValue(v) {
+  if (v == null) return null;
+  return String(v)
+    .replace(/^[\s.:;-]+/, "")   // quita :, ., ;, - al inicio
+    .replace(/[\s.:;-]+$/, "")   // quita al final
+    .replace(/\s{2,}/g, " ")
+    .trim() || null;
+}
 // Toma primera página aproximada si el PDF repite encabezado
 function keepFirstPageOnly(text) {
   const t = text || "";
@@ -67,16 +74,16 @@ function pickAfterLabel(text, labelVariants) {
     const reSameLine = new RegExp(`(?:^|\\n)\\s*${L}\\s*:??\\s*(.+)`, "i");
     const m1 = t.match(reSameLine);
     if (m1 && m1[1]) {
-      const v = m1[1].trim();
-      if (v && v !== "-" && v !== "—") return v;
+    const v = cleanValue(m1[1]);
+    if (v && v !== "-" && v !== "—") return v;
     }
 
     // Caso 2: línea siguiente
     const reNextLine = new RegExp(`(?:^|\\n)\\s*${L}\\s*:??\\s*\\n\\s*([^\\n]+)`, "i");
     const m2 = t.match(reNextLine);
     if (m2 && m2[1]) {
-      const v = m2[1].trim();
-      if (v && v !== "-" && v !== "—") return v;
+    const v = cleanValue(m2[1]);
+    if (v && v !== "-" && v !== "—") return v;
     }
   }
 
@@ -194,7 +201,7 @@ function parseReferences(text) {
 function findRutByPattern(text) {
   const t = text || "";
   const m = t.match(/\b\d{1,2}\.?\d{3}\.?\d{3}-[0-9Kk]\b/);
-  return m ? m[0].replace(/\./g, "") : null;
+  return m ? cleanValue(m[0].replace(/\./g, "")) : null;
 }
 
 function extractFacturaKolderStyle(fullText) {
@@ -290,3 +297,4 @@ app.post("/api/upload-pdf", upload.single("pdf"), async (req, res) => {
 // Render: usar el puerto que te asigna la plataforma
 const PORT = process.env.PORT || 5050;
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
+
