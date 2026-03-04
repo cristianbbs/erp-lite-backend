@@ -391,7 +391,7 @@ app.post("/api/login", (req, res) => {
     nombre: user.nombre,
     expiresAt: Date.now() + SESSION_MS,
   };
-  return res.json({ ok: true, token, nombre: user.nombre });
+  return res.json({ ok: true, token, nombre: user.nombre, rol: user.rol });
 });
 
 // LOGOUT
@@ -427,6 +427,7 @@ app.post("/api/upload-pdf", authenticate, upload.single("pdf"), async (req, res)
 
 const PORT = process.env.PORT || 5050;
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
+
 
 
 
