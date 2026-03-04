@@ -8,7 +8,7 @@ const app = express();
 // CORS: permite tu web
 app.use(cors({
   origin: ["https://hielokolder.cl", "https://www.hielokolder.cl"],
-  methods: ["GET", "POST"],
+  methods: ["GET", "POST", "OPTIONS"],
 }));
 app.use(express.json());
 
@@ -23,7 +23,7 @@ const upload = multer({
 });
 
 /* =========================
-   PARSER ROBUSTO (FIX COMUNA/CIUDAD/CONTACTO)
+   PARSER ROBUSTO
 ========================= */
 
 function normalizeText(t) {
@@ -52,12 +52,7 @@ function cleanValue(v) {
 function stripTrailingLabels(value) {
   if (!value) return value;
 
-  // etiquetas típicas que se “pegan” en el texto extraído
   const stopRe = /\b(CONTACTO|GIRO|DIRECCI[ÓO]N|COMUNA|CIUDAD|FECHA\s+EMISI[ÓO]N|MONTO\s+NETO|I\.V\.A\.|TOTAL|REFERENCIAS)\b/i;
-  const m = value.match(stopRe);
-  if (!m) return value;
-
-  // si aparece una etiqueta a mitad del string, cortamos ahí
   const idx = value.search(stopRe);
   if (idx > 0) return value.slice(0, idx).trim();
   return value.trim();
@@ -145,60 +140,6 @@ function parseMoneyLine(text, labelRegex) {
   return m ? m[1] : null;
 }
 
-function parseItems(text) {
-  const t = text || "";
-  const start = t.search(/Codigo\s+Descripcion/i);
-  if (start === -1) return [];
-
-  const afterStart = t.slice(start);
-  const endIdx = afterStart.search(/\nReferencias:\s*/i);
-  const block = endIdx === -1 ? afterStart : afterStart.slice(0, endIdx);
-
-  const lines = block.split("\n").map(l => l.trim()).filter(Boolean);
-  const cleaned = lines.filter(
-    l => !/^Codigo\s+Descripcion/i.test(l) && !/^Adic\.\*/i.test(l)
-  );
-
-  const items = [];
-  let current = null;
-
-  const isCodeLine = (l) => /^[A-Z0-9]{1,6}-[A-Z0-9]{1,10}\b/.test(l);
-  const qtyPriceValue = (l) => {
-    const m = l.match(/^([\d\.]+)\s+([A-Za-zÁÉÍÓÚÑñ\.]+)\s+(\d+)\s+([\d\.]+)$/);
-    if (!m) return null;
-    return { cantidad: `${m[1]} ${m[2]}`, precio: m[3], valor: m[4] };
-  };
-
-  for (const line of cleaned) {
-    if (isCodeLine(line)) {
-      if (current) items.push(current);
-      const [codigo, ...rest] = line.split(" ");
-      current = {
-        codigo,
-        descripcion: rest.join(" ").trim(),
-        cantidad: null,
-        precio: null,
-        valor: null,
-      };
-      continue;
-    }
-
-    if (!current) continue;
-
-    const qpv = qtyPriceValue(line);
-    if (qpv) {
-      current.cantidad = qpv.cantidad;
-      current.precio = qpv.precio;
-      current.valor = qpv.valor;
-    } else {
-      current.descripcion = (current.descripcion ? current.descripcion + "\n" : "") + line;
-    }
-  }
-
-  if (current) items.push(current);
-  return items;
-}
-
 function parseReferences(text) {
   const t = text || "";
   const idx = t.search(/\nReferencias:\s*/i);
@@ -223,8 +164,7 @@ function findRutByPattern(text) {
 }
 
 /**
- * Extrae un bloque de texto “de ubicación” para no capturar de más.
- * Buscamos desde "DIRECCION" hasta antes de "Fecha Emision" o "MONTO NETO" o "Codigo Descripcion".
+ * Extrae un bloque de texto “de ubicación”
  */
 function getLocationBlock(text) {
   const t = text || "";
@@ -238,33 +178,28 @@ function getLocationBlock(text) {
 }
 
 /**
- * Extrae COMUNA y CIUDAD sin pegar etiquetas (corta en CONTACTO/GIRO/etc).
- * Funciona aunque venga “COMUNA QUILICURA CIUDAD:SANTIAGO CONTACTO:JAVIERA”.
+ * COMUNA/CIUDAD robusto (corta si viene pegado “CIUDAD:STGO”)
  */
 function extractComunaCiudad(text) {
   const block = getLocationBlock(text);
 
   const cutRe = /(?=\b(CONTACTO|GIRO|DIRECCI[ÓO]N|FECHA\s+EMISI[ÓO]N|MONTO\s+NETO|TOTAL|I\.V\.A\.)\b)/i;
 
-  // COMUNA ...
   let comuna = null;
   {
-    const m = block.match(/COMUNA\s*:?\s*([\s\S]{0,80})/i);
+    const m = block.match(/COMUNA\s*:?\s*([\s\S]{0,120})/i);
     if (m && m[1]) {
-      let v = m[1].split(cutRe)[0]; // corta al aparecer otra etiqueta
-      // si también contiene "CIUDAD" pegado, cortamos antes
-      v = v.split(/CIUDAD\s*:?/i)[0];
+      let v = m[1].split(cutRe)[0];
+      v = v.split(/CIUDAD\s*:?/i)[0]; // <-- CLAVE: corta aunque venga pegado
       comuna = cleanValue(v);
     }
   }
 
-  // CIUDAD ...
   let ciudad = null;
   {
-    const m = block.match(/CIUDAD\s*:?\s*([\s\S]{0,80})/i);
+    const m = block.match(/CIUDAD\s*:?\s*([\s\S]{0,120})/i);
     if (m && m[1]) {
       let v = m[1].split(cutRe)[0];
-      // si contiene "CONTACTO" pegado, cortamos antes
       v = v.split(/\bCONTACTO\b/i)[0];
       ciudad = cleanValue(v);
     }
@@ -272,6 +207,118 @@ function extractComunaCiudad(text) {
 
   return { comuna, ciudad };
 }
+
+/* =========================
+   ITEMS (NUEVO ROBUSTO)
+   Soporta:
+   - HC-101 ... 40 450 18.000
+   - HP-02 ... 1.400 KG 285 399.000
+   - Descripción en varias líneas
+========================= */
+
+function parseItems(text) {
+  const t = text || "";
+
+  // 1) Busca inicio de la tabla
+  let startIdx = t.search(/Codigo\s+Descripcion/i);
+  if (startIdx === -1) startIdx = t.search(/C[oó]digo\s+Descrip/i);
+  if (startIdx === -1) startIdx = t.search(/\bCodigo\b/i);
+  if (startIdx === -1) return [];
+
+  let afterStart = t.slice(startIdx);
+
+  // 2) Corta antes de Referencias o Montos
+  const stopIdx = afterStart.search(/\n\s*(Referencias:|MONTO NETO|I\.V\.A\.|TOTAL)\b/i);
+  const block = stopIdx === -1 ? afterStart : afterStart.slice(0, stopIdx);
+
+  // 3) Limpia líneas y quita encabezados
+  const lines = block
+    .split("\n")
+    .map(l => l.replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .filter(l => !/^Codigo\s+Descripcion/i.test(l))
+    .filter(l => !/^C[oó]digo\s+Descrip/i.test(l))
+    .filter(l => !/^Cantidad\s+Precio/i.test(l))
+    .filter(l => !/^Adic\.\*/i.test(l))
+    .filter(l => !/%Desc\./i.test(l));
+
+  const codeRe = /^([A-Z0-9]{1,8}-[A-Z0-9]{1,8})\b/;
+
+  // Captura: codigo | descripcion... | cantidad | unidad opcional | precio | valor
+  const rowRe = new RegExp(
+    "^([A-Z0-9]{1,8}-[A-Z0-9]{1,8})\\s+" +        // código
+    "([\\s\\S]*?)\\s+" +                          // descripción (no-greedy)
+    "([0-9][0-9\\.]*)" +                          // cantidad
+    "(?:\\s+([A-Za-zÁÉÍÓÚÑñ\\.]{1,10}))?\\s+" +   // unidad opcional
+    "([0-9][0-9\\.]*)\\s+" +                      // precio
+    "(?:[0-9][0-9\\.]*\\s+)?" +                   // adic opcional
+    "(?:[0-9][0-9\\.]*\\s+)?" +                   // %desc opcional
+    "([0-9][0-9\\.]*)$",                          // valor
+    "i"
+  );
+
+  const items = [];
+  let current = null;
+
+  function pushCurrent() {
+    if (!current) return;
+
+    const joined = current.lines.join(" ").replace(/\s+/g, " ").trim();
+    const m = joined.match(rowRe);
+
+    if (m) {
+      const codigo = m[1];
+      const descripcion = (m[2] || "").trim();
+      const cantidadNum = (m[3] || "").trim();
+      const unidad = (m[4] || "").trim();
+      const precio = (m[5] || "").trim();
+      const valor = (m[6] || "").trim();
+
+      items.push({
+        codigo,
+        descripcion,
+        cantidad: unidad ? `${cantidadNum} ${unidad}` : cantidadNum,
+        precio,
+        valor,
+      });
+    } else {
+      // fallback mínimo
+      const first = current.lines[0] || "";
+      const mm = first.match(codeRe);
+      const codigo = mm ? mm[1] : null;
+      const desc = joined.replace(codeRe, "").trim();
+
+      if (codigo) {
+        items.push({
+          codigo,
+          descripcion: desc || null,
+          cantidad: null,
+          precio: null,
+          valor: null,
+        });
+      }
+    }
+
+    current = null;
+  }
+
+  for (const line of lines) {
+    const m = line.match(codeRe);
+    if (m) {
+      pushCurrent();
+      current = { lines: [line] };
+    } else if (current) {
+      current.lines.push(line);
+    }
+  }
+  pushCurrent();
+
+  return items.filter(it => it.codigo);
+}
+
+/* =========================
+   EXTRACTOR PRINCIPAL
+========================= */
 
 function extractFacturaKolderStyle(fullText) {
   const text = keepFirstPageOnly(normalizeText(fullText));
@@ -289,7 +336,6 @@ function extractFacturaKolderStyle(fullText) {
   const contacto = pickAfterLabel(text, ["CONTACTO", "CONTACTO:"]);
   const fecha_emision = pickFechaEmision(text);
 
-  // FIX: comuna/ciudad robusto, sin “pegote”
   const { comuna, ciudad } = extractComunaCiudad(text);
 
   const items = parseItems(text);
@@ -356,4 +402,3 @@ app.post("/api/upload-pdf", upload.single("pdf"), async (req, res) => {
 // Render: usar el puerto que te asigna la plataforma
 const PORT = process.env.PORT || 5050;
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
-
