@@ -224,7 +224,7 @@ function parseItems(text) {
     .replace(/\n{2,}/g, "\n");
 
   // Código tipo HC-101 / HP-02 / etc.
-  const codeRe = /\b([A-Z0-9]{1,8}-[A-Z0-9]{1,8})\b/g;
+  const codeRe = /\b([A-Z]{2}-\d{1,4})\b/g;
 
   // Cortes típicos donde ya NO hay ítems
   const stopRe = /\b(Referencias:|MONTO NETO|I\.V\.A\.|TOTAL)\b/i;
@@ -450,4 +450,5 @@ app.post("/api/upload-pdf", upload.single("pdf"), async (req, res) => {
 // Render: usar el puerto que te asigna la plataforma
 const PORT = process.env.PORT || 5050;
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
+
 
