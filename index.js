@@ -540,6 +540,17 @@ app.post("/api/upload-pdf", authenticate, upload.single("pdf"), async (req, res)
     return res.status(500).json({ ok: false, error: "Error procesando PDF" });
   }
 });
-
+// VERIFICAR CONTRASEÑA (para confirmar acciones críticas)
+app.post("/api/verify-password", authenticate, (req, res) => {
+  const { password } = req.body || {};
+  if (!password) return res.status(400).json({ ok: false, error: "Falta contraseña." });
+  const rutNorm = req.session.rut.toLowerCase().replace(/\s/g, "");
+  const user = USERS.find((u) => u.rut.toLowerCase().replace(/\s/g, "") === rutNorm);
+  if (!user || user.passHash !== sha256(password)) {
+    return res.status(401).json({ ok: false, error: "Contraseña incorrecta." });
+  }
+  return res.json({ ok: true });
+});
 const PORT = process.env.PORT || 5050;
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
+
