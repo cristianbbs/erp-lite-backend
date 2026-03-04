@@ -33,8 +33,8 @@ function sha256(s) {
 }
 
 const USERS = [
-  { rut: "16088206-9", passHash: sha256("123456Aa-"), nombre: "Cristian" },
-  { rut: "10081284-3", passHash: sha256("123456Bb-"), nombre: "Bernardo" },
+  { rut: "16088206-9", passHash: sha256("123456Aa-"), nombre: "Cristian", rol: "admin" },
+  { rut: "10081284-3", passHash: sha256("123456Bb-"), nombre: "Bernardo", rol: "editor" },
 ];
 
 // Tokens activos en memoria: { token -> { rut, nombre, expiresAt } }
@@ -427,5 +427,6 @@ app.post("/api/upload-pdf", authenticate, upload.single("pdf"), async (req, res)
 
 const PORT = process.env.PORT || 5050;
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
+
 
 
