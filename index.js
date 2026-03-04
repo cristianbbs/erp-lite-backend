@@ -3,17 +3,18 @@ import cors from "cors";
 import multer from "multer";
 import pdf from "pdf-parse";
 import crypto from "crypto";
+import mysql from "mysql2/promise";
 
 const app = express();
 
 app.use(
   cors({
     origin: ["https://hielokolder.cl", "https://www.hielokolder.cl"],
-    methods: ["GET", "POST", "OPTIONS"],
+    methods: ["GET", "POST", "DELETE", "OPTIONS"],
   })
 );
 app.use(express.json());
-// Multer en memoria (NO guarda PDF en disco)
+
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 15 * 1024 * 1024 },
@@ -22,10 +23,42 @@ const upload = multer({
     cb(ok ? null : new Error("Solo se permiten PDFs"), ok);
   },
 });
+
+/* =========================
+   BASE DE DATOS MySQL
+========================= */
+
+const db = await mysql.createPool({
+  host: "srv2.cpanelhost.cl",
+  user: "chi111878_erp_user",
+  password: "9002Tabu-",
+  database: "chi111878_erp_lite",
+  waitForConnections: true,
+  connectionLimit: 5,
+});
+
+// Crear tabla si no existe
+await db.execute(`
+  CREATE TABLE IF NOT EXISTS documentos (
+    id VARCHAR(64) PRIMARY KEY,
+    created_at VARCHAR(64),
+    source_name VARCHAR(255),
+    rut VARCHAR(32),
+    cliente VARCHAR(255),
+    tipo_documento VARCHAR(100),
+    nro_documento VARCHAR(32),
+    fecha VARCHAR(64),
+    monto_total_digits VARCHAR(32),
+    lote VARCHAR(64),
+    detalle JSON,
+    preview TEXT
+  )
+`);
+
+console.log("Base de datos conectada y lista.");
+
 /* =========================
    USUARIOS Y AUTH
-   Contraseñas hasheadas con SHA-256.
-   Para generar un hash: crypto.createHash('sha256').update('tuClave').digest('hex')
 ========================= */
 
 function sha256(s) {
@@ -37,9 +70,8 @@ const USERS = [
   { rut: "10081284-3", passHash: sha256("123456Bb-"), nombre: "Bernardo", rol: "editor" },
 ];
 
-// Tokens activos en memoria: { token -> { rut, nombre, expiresAt } }
 const activeSessions = {};
-const SESSION_MS = 8 * 60 * 60 * 1000; // 8 horas
+const SESSION_MS = 8 * 60 * 60 * 1000;
 
 function generateToken() {
   return crypto.randomBytes(32).toString("hex");
@@ -375,22 +407,12 @@ app.get("/health", (req, res) => res.json({ ok: true }));
 // LOGIN
 app.post("/api/login", (req, res) => {
   const { rut, password } = req.body || {};
-  if (!rut || !password) {
-    return res.status(400).json({ ok: false, error: "Falta RUT o contraseña." });
-  }
+  if (!rut || !password) return res.status(400).json({ ok: false, error: "Falta RUT o contraseña." });
   const rutNorm = String(rut).replace(/\s/g, "").toLowerCase();
-  const user = USERS.find(
-    (u) => u.rut.toLowerCase().replace(/\s/g, "") === rutNorm
-  );
-  if (!user || user.passHash !== sha256(password)) {
-    return res.status(401).json({ ok: false, error: "RUT o contraseña incorrectos." });
-  }
+  const user = USERS.find((u) => u.rut.toLowerCase().replace(/\s/g, "") === rutNorm);
+  if (!user || user.passHash !== sha256(password)) return res.status(401).json({ ok: false, error: "RUT o contraseña incorrectos." });
   const token = generateToken();
-  activeSessions[token] = {
-    rut: user.rut,
-    nombre: user.nombre,
-    expiresAt: Date.now() + SESSION_MS,
-  };
+  activeSessions[token] = { rut: user.rut, nombre: user.nombre, rol: user.rol, expiresAt: Date.now() + SESSION_MS };
   return res.json({ ok: true, token, nombre: user.nombre, rol: user.rol });
 });
 
@@ -404,20 +426,114 @@ app.post("/api/logout", (req, res) => {
 
 // VERIFICAR SESIÓN
 app.get("/api/me", authenticate, (req, res) => {
-  return res.json({ ok: true, rut: req.session.rut, nombre: req.session.nombre });
+  return res.json({ ok: true, rut: req.session.rut, nombre: req.session.nombre, rol: req.session.rol });
+});
+
+// OBTENER TODOS LOS DOCUMENTOS
+app.get("/api/documentos", authenticate, async (req, res) => {
+  try {
+    const [rows] = await db.execute(
+      "SELECT id, created_at, source_name, rut, cliente, tipo_documento, nro_documento, fecha, monto_total_digits, lote FROM documentos ORDER BY CAST(nro_documento AS UNSIGNED) DESC"
+    );
+    return res.json({ ok: true, documentos: rows });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error obteniendo documentos." });
+  }
+});
+
+// OBTENER UN DOCUMENTO POR ID
+app.get("/api/documentos/:id", authenticate, async (req, res) => {
+  try {
+    const [rows] = await db.execute("SELECT * FROM documentos WHERE id = ?", [req.params.id]);
+    if (!rows.length) return res.status(404).json({ ok: false, error: "No encontrado." });
+    const doc = rows[0];
+    doc.detalle = typeof doc.detalle === "string" ? JSON.parse(doc.detalle) : doc.detalle;
+    return res.json({ ok: true, documento: doc });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error obteniendo documento." });
+  }
+});
+
+// ELIMINAR UN DOCUMENTO (solo admin)
+app.delete("/api/documentos/:id", authenticate, async (req, res) => {
+  if (req.session.rol !== "admin") return res.status(403).json({ ok: false, error: "Sin permisos." });
+  try {
+    await db.execute("DELETE FROM documentos WHERE id = ?", [req.params.id]);
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error eliminando documento." });
+  }
+});
+
+// ELIMINAR TODOS (solo admin)
+app.delete("/api/documentos", authenticate, async (req, res) => {
+  if (req.session.rol !== "admin") return res.status(403).json({ ok: false, error: "Sin permisos." });
+  try {
+    await db.execute("DELETE FROM documentos");
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error eliminando documentos." });
+  }
 });
 
 // SUBIR PDF (protegido)
 app.post("/api/upload-pdf", authenticate, upload.single("pdf"), async (req, res) => {
   try {
-    if (!req.file)
-      return res.status(400).json({ ok: false, error: "Falta archivo PDF" });
+    if (!req.file) return res.status(400).json({ ok: false, error: "Falta archivo PDF" });
     const parsed = await pdf(req.file.buffer);
     const text = normalizeText(parsed.text);
-    if (!text || text.length < 30) {
-      return res.status(422).json({ ok: false, error: "No se pudo leer texto suficiente. ¿Seguro que es PDF nativo?" });
-    }
+    if (!text || text.length < 30) return res.status(422).json({ ok: false, error: "No se pudo leer texto suficiente. ¿Seguro que es PDF nativo?" });
+
     const fields = extractFacturaKolderStyle(text);
+    const nro = String(fields?.numero_documento || "").trim();
+    if (!nro) return res.status(422).json({ ok: false, error: "No se detectó el número de documento." });
+
+    // Verificar duplicado
+    const [existing] = await db.execute(
+      "SELECT id FROM documentos WHERE CAST(nro_documento AS UNSIGNED) = CAST(? AS UNSIGNED)",
+      [nro]
+    );
+    if (existing.length > 0) return res.status(409).json({ ok: false, error: `La factura ${nro} ya existe.` });
+
+    const id = "doc_" + Date.now().toString(36) + "_" + crypto.randomBytes(3).toString("hex");
+    const now = new Date().toISOString();
+
+    // Extraer lote
+    const items = fields?.items || [];
+    const joined = items.map(it => it?.descripcion || "").join("\n");
+    const loteMatch = joined.match(/LOTE\s*:\s*([A-Za-z0-9\-_.]+)/i);
+    const lote = loteMatch ? loteMatch[1].trim() : "";
+
+    // Normalizar RUT
+    const rut = (fields?.rut || "").replace(/\s+/g, "").trim();
+
+    // Normalizar monto
+    const montoRaw = fields?.total || "";
+    const monto_total_digits = String(montoRaw).replace(/[^\d]/g, "").replace(/^0+/, "") || "0";
+
+    // Normalizar fecha
+    const fechaRaw = fields?.fecha_emision || "";
+    const fechaMatch = String(fechaRaw).match(/\b(\d{2})[\/-](\d{2})[\/-](\d{4})\b/);
+    const fecha = fechaMatch ? `${fechaMatch[1]}-${fechaMatch[2]}-${fechaMatch[3]}` : String(fechaRaw).trim();
+
+    await db.execute(
+      `INSERT INTO documentos (id, created_at, source_name, rut, cliente, tipo_documento, nro_documento, fecha, monto_total_digits, lote, detalle, preview)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        id, now, req.file.originalname,
+        rut,
+        (fields?.razon_social || "").trim(),
+        (fields?.tipo_documento || "").replace(/\s+/g, " ").trim(),
+        nro, fecha, monto_total_digits, lote,
+        JSON.stringify(fields),
+        text.slice(0, 2500),
+      ]
+    );
+
     return res.json({ ok: true, fields, preview: text.slice(0, 2500), meta: { pages: parsed.numpages || null } });
   } catch (err) {
     console.error(err);
@@ -427,7 +543,3 @@ app.post("/api/upload-pdf", authenticate, upload.single("pdf"), async (req, res)
 
 const PORT = process.env.PORT || 5050;
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
-
-
-
-
