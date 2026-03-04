@@ -259,6 +259,39 @@ function deglueItemTail(line) {
   // Si ya está bien separado al final, no tocar
   if (tailOkRe.test(s)) return s;
 
+  // Caso especial: dos montos con miles PEGADOS al final
+  // Ej: "... 13.5003.500" -> "... 13.500 3.500"
+  // Luego intentamos formar "... <qty> <precio> <valor>"
+  const mTwo = s.match(/(\d{1,3}(?:\.\d{3})+)(\d{1,3}(?:\.\d{3})+)\s*$/);
+  if (mTwo) {
+    const a = mTwo[1]; // ej 13.500
+    const b = mTwo[2]; // ej 3.500
+
+    const endLen = (a + b).length;
+    const base = s.slice(0, s.length - endLen).trim();
+
+    // Si base ya termina con una cantidad (número), la respetamos.
+    // Si no, asumimos cantidad=1 (muy común en "servicios/transporte")
+    const hasQty = /(\d{1,3}(?:\.\d{3})*|\d+)\s*$/.test(base);
+
+    let rebuilt;
+    
+    if (/TRANSPORTE/i.test(base)) {
+      // Para transporte, suele ser: qty=1, precio=último monto, valor=último monto
+      rebuilt = `${base} 1 ${b} ${b}`;
+    } else {
+      rebuilt = hasQty
+        ? `${base} ${a} ${b}`
+        : `${base} 1 ${a} ${b}`;
+    }
+
+    // Si con eso ya calza el tail normal, retornamos
+    if (tailOkRe.test(rebuilt)) return rebuilt;
+
+    // Si no calza, igual devolvemos separado (ayuda al tailRe afuera)
+    return rebuilt;
+  }
+  
   // Caso: algo termina con ".000" (o ".123") y viene pegado tipo "4045018.000"
   const m = s.match(/(\d+)(\.\d{3})+\s*$/);
   if (!m) return s;
@@ -550,6 +583,7 @@ app.post("/api/upload-pdf", upload.single("pdf"), async (req, res) => {
 // Render: usar el puerto que te asigna la plataforma
 const PORT = process.env.PORT || 5050;
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
+
 
 
 
