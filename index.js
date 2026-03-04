@@ -233,7 +233,7 @@ function extractComunaCiudad(text) {
  *  - "HP - 02" -> "HP-02"
  */
 function repairBrokenCodes(s) {
-  return (s || "").replace(/([A-Z]{2})\s*-\s*(\d{1,4})/g, "$1-$2");
+  return (s || "").replace(/([A-Z]{2,5})\s*-\s*(\d{1,5})/g, "$1-$2");
 }
 function deglueItemTail(line) {
   let s = (line || "").trim();
@@ -349,8 +349,8 @@ function parseItems(text) {
   t = repairBrokenCodes(t);
 
   // Código de producto (sin \b final para permitir pegado)
-  const codeReGlobal = /\b([A-Z]{2}-\d{1,4})/g;
-  const codeReOne = /\b([A-Z]{2}-\d{1,4})/;
+  const codeReGlobal = /\b([A-Z]{2,5}-\d{1,5})/g;
+  const codeReOne = /\b([A-Z]{2,5}-\d{1,5})/;
 
   // Cortes típicos donde ya NO hay ítems
   const stopRe = /\b(Referencias:|Forma de Pago:|MONTO NETO|I\.V\.A\.|TOTAL)\b/i;
@@ -413,17 +413,15 @@ function parseItems(text) {
     const mTail = chunk.match(tailRe);
 
     if (!mTail) {
-      // Si no calza, no inventamos valores: lo dejamos como "solo descripción"
-      // (mejor eso que contaminar columnas con números del medio)
       const descripcion = cleanDesc(chunk.replace(noiseRe, "").trim()) || null;
       if (descripcion) {
-      items.push({
-        codigo: code,
-        descripcion,
-        cantidad,
-        precio,
-        valor,
-      });
+        items.push({
+          codigo: code,
+          descripcion,
+          cantidad: null,
+          precio: null,
+          valor: null,
+        });
       }
       continue;
     }
@@ -454,8 +452,8 @@ function parseItems(text) {
       codigo: code,
       descripcion,
       cantidad,
-      precio: precioRaw,
-      valor: valorRaw,
+      precio,
+      valor,
     });
   }
 
@@ -552,6 +550,7 @@ app.post("/api/upload-pdf", upload.single("pdf"), async (req, res) => {
 // Render: usar el puerto que te asigna la plataforma
 const PORT = process.env.PORT || 5050;
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
+
 
 
 
