@@ -247,102 +247,107 @@ function parseRowTailFromTokens(tokens) {
 }
 
 function parseItems(text) {
-  const t = normalizeText(text || "");
-  const stopRe = /\b(Referencias:|MONTO NETO|I\.V\.A\.|TOTAL)\b/i;
+  const t = (text || "")
+    .replace(/\r/g, "\n")
+    .replace(/\u00A0/g, " ")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n{2,}/g, "\n");
 
-  const firstCodeIdx = t.search(/\b[A-Z]{2}-\d{1,4}\b/);
-  if (firstCodeIdx === -1) return [];
+  // Detecta códigos tipo: HP-02 / HC-101 pero tolera espacios alrededor del guion
+  // Captura: "HP-02", "HP - 02", "HP- 02", "HP -02"
+  const codeRe = /(^|\s)([A-Z]{2})\s*-\s*([0-9]{1,4})(?=\s|$)/g;
 
-  let working = t.slice(firstCodeIdx);
+  const stopRe = /\b(Referencias:|MONTO\s+NETO|I\.V\.A\.|TOTAL)\b/i;
+
+  const firstCode = t.search(codeRe);
+  if (firstCode === -1) return [];
+
+  let working = t.slice(firstCode);
   const stop = working.search(stopRe);
   if (stop !== -1) working = working.slice(0, stop);
 
-  const lines = working
-    .split("\n")
-    .map((l) => l.trim())
-    .filter(Boolean);
+  const matches = [...working.matchAll(codeRe)];
+  if (!matches.length) return [];
 
   const items = [];
-  const codeLineRe = /^([A-Z]{2}-\d{1,4})\b\s*(.*)$/;
-  const newCodeRe = /^\b[A-Z]{2}-\d{1,4}\b/;
-  const hardStopLineRe =
-    /^(Referencias:|Forma de Pago:|MONTO NETO|I\.V\.A\.|TOTAL)\b/i;
 
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    const m = line.match(codeLineRe);
-    if (!m) continue;
+  const isMoneyish = (s) => /^[0-9][0-9\.]*$/.test(s); // 18.000 / 399.000 / 450 / 620
+  const isQty = (s) => /^[0-9][0-9\.]*$/.test(s);      // 40 / 1.400
 
-    const codigo = m[1];
-    let base = (m[2] || "").trim();
+  const cleanDesc = (s) =>
+    (s || "")
+      .replace(/\s+/g, " ")
+      .trim();
 
-    // armamos “bloque” con hasta 2 líneas siguientes si parecen parte del ítem
-    const buf = [base];
+  for (let i = 0; i < matches.length; i++) {
+    const sigla = matches[i][2];         // HP / HC
+    const num = matches[i][3];           // 02 / 101
+    const codigo = `${sigla}-${num}`;
 
-    for (let j = 1; j <= 2; j++) {
-      const next = lines[i + j];
-      if (!next) break;
-      if (hardStopLineRe.test(next)) break;
-      if (newCodeRe.test(next)) break; // otro ítem
-      // si es una etiqueta típica suelta, cortamos
-      if (/\b(CONTACTO|GIRO|DIRECCI[ÓO]N|COMUNA|CIUDAD|FECHA\s+EMISI[ÓO]N)\b/i.test(next)) break;
-      buf.push(next);
-    }
+    const start = matches[i].index ?? 0;
+    const end = (i + 1 < matches.length)
+      ? (matches[i + 1].index ?? working.length)
+      : working.length;
 
-    const chunk = buf.join(" ").replace(/\s+/g, " ").trim();
+    // Chunk entre este código y el siguiente
+    let chunk = working.slice(start, end);
 
-    // tokeniza y busca cola en el final
+    // Normaliza para tokenizar mejor
+    chunk = chunk.replace(/\n/g, " ").replace(/\s+/g, " ").trim();
+
+    // Quita el código del inicio (todas sus variantes con espacios)
+    chunk = chunk.replace(new RegExp(`^${sigla}\\s*-\\s*${num}\\s*`), "");
+
     const tokens = chunk.split(" ").filter(Boolean);
 
-    const tail = parseRowTailFromTokens(tokens);
-    let cantidad = null, unidad = null, precio = null, valor = null;
+    // Estrategia: buscar al final "precio" y "valor" como números,
+    // y antes una cantidad numérica. (No metemos palabras como "BOLSAS")
+    let idxValor = -1, idxPrecio = -1;
 
-    if (tail) {
-      cantidad = normalizeQtyToNumberString(tail.qty);
-      unidad = tail.unit ? cleanValue(tail.unit) : null;
-      precio = tail.price ? cleanValue(tail.price) : null;
-      valor = tail.value ? cleanValue(tail.value) : null;
-    }
-
-    // descripción = chunk sin la cola (si se pudo)
-    let descripcion = chunk;
-
-    if (tail) {
-      // intentamos cortar por “value” (último campo) para remover todo al final
-      const valToken = String(tail.value);
-      const idx = descripcion.lastIndexOf(valToken);
-      if (idx > 0) {
-        descripcion = descripcion.slice(0, idx).trim();
-      }
-      // luego, si existe price, cortar también
-      const priceToken = String(tail.price);
-      const idx2 = descripcion.lastIndexOf(priceToken);
-      if (idx2 > 0) {
-        descripcion = descripcion.slice(0, idx2).trim();
-      }
-      // y si existe qty, cortar también
-      const qtyToken = String(tail.qty);
-      const idx3 = descripcion.lastIndexOf(qtyToken);
-      if (idx3 > 0) {
-        descripcion = descripcion.slice(0, idx3).trim();
+    for (let k = tokens.length - 1; k >= 0; k--) {
+      if (isMoneyish(tokens[k])) {
+        if (idxValor === -1) idxValor = k;
+        else { idxPrecio = k; break; }
       }
     }
 
-    descripcion = cleanValue(descripcion);
+    const valor = (idxValor !== -1) ? tokens[idxValor] : null;
+    const precio = (idxPrecio !== -1) ? tokens[idxPrecio] : null;
 
-    // filtro anti-basura
-    if (
-      descripcion &&
-      /\b(Referencias:|Forma de Pago:|Timbre Electr[oó]nico|SII)\b/i.test(descripcion)
-    ) {
-      continue;
+    // Cantidad: último número antes del precio/valor
+    let cantidad = null;
+    const limit = (idxPrecio !== -1 ? idxPrecio : idxValor);
+    if (limit > 0) {
+      for (let k = limit - 1; k >= 0; k--) {
+        if (isQty(tokens[k])) { cantidad = tokens[k]; break; }
+      }
     }
+
+    // Descripción: todo antes de la cantidad (si existe),
+    // y si no existe, todo antes del precio/valor.
+    let descTokens = tokens;
+
+    if (cantidad) {
+      const cutIdx = tokens.indexOf(cantidad);
+      if (cutIdx !== -1) descTokens = tokens.slice(0, cutIdx);
+    } else if (idxPrecio !== -1) {
+      descTokens = tokens.slice(0, idxPrecio);
+    } else if (idxValor !== -1) {
+      descTokens = tokens.slice(0, idxValor);
+    }
+
+    // Limpia cosas típicas que se cuelan en descripción
+    const descripcion = cleanDesc(
+      descTokens.join(" ")
+        .replace(/\b(BOLSAS|KG|UN|UND|UNIDAD|KILOGRAMOS)\b/gi, "") // opcional
+    );
+
+    if (!descripcion && !cantidad && !precio && !valor) continue;
 
     items.push({
       codigo,
       descripcion: descripcion || null,
-      cantidad: cantidad || null, // SOLO número (string)
-      unidad: unidad || null,
+      cantidad: cantidad || null, // SOLO número
       precio: precio || null,
       valor: valor || null,
     });
@@ -441,3 +446,4 @@ app.post("/api/upload-pdf", upload.single("pdf"), async (req, res) => {
 
 const PORT = process.env.PORT || 5050;
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
+
