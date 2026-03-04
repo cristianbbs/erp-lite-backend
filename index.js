@@ -309,10 +309,18 @@ function deglueItemTail(line) {
 
       // Score: preferir qty de 2-4 dígitos y price de 2-5 dígitos
       // (esto hace que 40/450 gane sobre 4/045)
-      const score =
+      let score =
         Math.abs(qtyDigits.length - 2) * 10 +
         Math.abs(priceLen - 3) * 5 +
-        valFirstLen; // leve preferencia por valFirstLen=2 en estos casos
+        valFirstLen;
+      
+      // Penaliza soluciones típicamente malas
+      if (qtyDigits.length === 1) score += 40;              // evita 4 en vez de 40, 1 en vez de 100
+      if (parseInt(priceDigits, 10) < 100) score += 35;     // evita 45 en vez de 450 (ajusta si tienes precios <100 reales)
+      if (/^0\d/.test(valFirst)) score += 25;               // evita 018.000 si existe 18.000
+      
+      // Premia cantidades que terminan en 0 (muy común en tus docs: 40, 100, 700...)
+      if (/0$/.test(qtyDigits)) score -= 10;
 
       if (!best || score < best.score) {
         best = {
@@ -539,6 +547,7 @@ app.post("/api/upload-pdf", upload.single("pdf"), async (req, res) => {
 // Render: usar el puerto que te asigna la plataforma
 const PORT = process.env.PORT || 5050;
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
+
 
 
 
