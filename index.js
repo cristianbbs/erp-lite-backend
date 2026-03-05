@@ -847,18 +847,20 @@ app.post("/api/lotes", authenticate, async (req, res) => {
 
     const id = "lot_" + Date.now().toString(36) + "_" + crypto.randomBytes(3).toString("hex");
 
+    const nullify = v => (v === undefined || v === "" ? null : v);
+    
     await db.execute(
       `INSERT INTO lotes (id, codigo, producto, codigo_producto, fecha_produccion, hora_inicio, hora_fin,
         turno, operario, responsable_liberacion, linea, cantidad_kg, estado, fecha_vencimiento,
         observaciones, created_at, temperatura, limpieza_previa, incidencias, insumos,
         inspeccion_visual, control_temperatura, liberado_por, fecha_liberacion)
        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-      [id, codigo, producto, codigo_producto, fecha_produccion, hora_inicio, hora_fin,
-       turno, operario, responsable_liberacion, linea, cantidad_kg || 0, estado || "Liberado",
-       fecha_vencimiento, observaciones, new Date().toISOString(),
-       temperatura, limpieza_previa ? 1 : 0, incidencias,
+      [id, codigo, nullify(producto), nullify(codigo_producto), nullify(fecha_produccion), nullify(hora_inicio), nullify(hora_fin),
+       nullify(turno), nullify(operario), nullify(responsable_liberacion), nullify(linea), cantidad_kg || 0, estado || "Liberado",
+       nullify(fecha_vencimiento), nullify(observaciones), new Date().toISOString(),
+       temperatura != null ? temperatura : null, limpieza_previa ? 1 : 0, nullify(incidencias),
        JSON.stringify(insumos || []),
-       inspeccion_visual, control_temperatura, liberado_por, fecha_liberacion]
+       nullify(inspeccion_visual), nullify(control_temperatura), nullify(liberado_por), nullify(fecha_liberacion)]
     );
 
     return res.json({ ok: true, id });
@@ -895,6 +897,7 @@ app.delete("/api/lotes/:id", authenticate, async (req, res) => {
 });
 const PORT = process.env.PORT || 5050;
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
+
 
 
 
