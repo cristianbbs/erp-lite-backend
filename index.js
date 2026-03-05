@@ -466,7 +466,11 @@ app.patch("/api/documentos/:id/lotes", authenticate, async (req, res) => {
     const { lotes } = req.body;
     if (!Array.isArray(lotes)) return res.status(400).json({ ok: false, error: "Formato inválido." });
     if (lotes.length > 10) return res.status(400).json({ ok: false, error: "Máximo 10 lotes por factura." });
-    await db.execute("UPDATE documentos SET lotes = ? WHERE id = ?", [JSON.stringify(lotes), req.params.id]);
+    const lotesCodigos = lotes.map(l => l.codigo).join(", ");
+    await db.execute(
+      "UPDATE documentos SET lotes = ?, lote = ? WHERE id = ?",
+      [JSON.stringify(lotes), lotesCodigos, req.params.id]
+    );
     return res.json({ ok: true });
   } catch (err) {
     console.error(err);
@@ -812,16 +816,15 @@ app.get("/api/lotes/:id", authenticate, async (req, res) => {
 
     // Buscar facturas vinculadas por código de lote
     const [facturas] = await db.execute(
-      "SELECT id, nro_documento, fecha, cliente, rut, monto_total_digits, detalle FROM documentos"
+      "SELECT id, nro_documento, fecha, cliente, rut, monto_total_digits, lotes FROM documentos"
     );
     const vinculadas = facturas.filter(f => {
-      const det = typeof f.detalle === "string" ? JSON.parse(f.detalle || "{}") : (f.detalle || {});
-      const loteFactura = det.lote || "";
-      return loteFactura.trim().toUpperCase() === lote.codigo.trim().toUpperCase();
-    }).map(f => {
-      const det = typeof f.detalle === "string" ? JSON.parse(f.detalle || "{}") : (f.detalle || {});
-      return { id: f.id, nro_documento: f.nro_documento, fecha: f.fecha, cliente: f.cliente, rut: f.rut, total: f.monto_total_digits, items: det.items || [] };
-    });
+      const lotesJSON = typeof f.lotes === "string" ? JSON.parse(f.lotes || "[]") : (f.lotes || []);
+      return lotesJSON.some(l => l.codigo?.trim().toUpperCase() === lote.codigo.trim().toUpperCase());
+    }).map(f => ({
+      id: f.id, nro_documento: f.nro_documento, fecha: f.fecha,
+      cliente: f.cliente, rut: f.rut, total: f.monto_total_digits
+    }));
 
     return res.json({ ok: true, lote, facturas_vinculadas: vinculadas });
   } catch (err) {
@@ -929,4 +932,5 @@ app.delete("/api/lotes/:id", authenticate, async (req, res) => {
 });
 const PORT = process.env.PORT || 5050;
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
+
 
