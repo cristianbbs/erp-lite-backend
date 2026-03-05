@@ -450,6 +450,8 @@ app.get("/api/documentos/:id", authenticate, async (req, res) => {
     const doc = rows[0];
     doc.detalle = typeof doc.detalle === "string" ? JSON.parse(doc.detalle) : doc.detalle;
     return res.json({ ok: true, documento: doc });
+    doc.lotes = typeof doc.lotes === "string" ? JSON.parse(doc.lotes || "[]") : (doc.lotes || []);
+
   } catch (err) {
     console.error(err);
     return res.status(500).json({ ok: false, error: "Error obteniendo documento." });
@@ -912,6 +914,7 @@ app.delete("/api/lotes/:id", authenticate, async (req, res) => {
 });
 const PORT = process.env.PORT || 5050;
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
+
 
 
 
