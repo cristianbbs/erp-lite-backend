@@ -713,8 +713,32 @@ app.delete("/api/boletas/:id", authenticate, async (req, res) => {
     return res.status(500).json({ ok: false, error: "Error eliminando boleta." });
   }
 });
+/* =========================
+   ANÁLISIS DE VENTAS
+========================= */
+
+app.get("/api/analisis/ventas", authenticate, async (req, res) => {
+  if (req.session.rol !== "admin") return res.status(403).json({ ok: false, error: "Sin permisos." });
+  try {
+    const { desde, hasta } = req.query;
+
+    // Traer facturas con sus items
+    const [facturas] = await db.execute(
+      "SELECT id, nro_documento, fecha, rut, cliente, tipo_documento, monto_total_digits, detalle FROM documentos"
+    );
+    const [boletas] = await db.execute(
+      "SELECT id, nro_documento, fecha, neto, iva, total, items FROM boletas"
+    );
+
+    return res.json({ ok: true, facturas, boletas });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error obteniendo datos." });
+  }
+});
 const PORT = process.env.PORT || 5050;
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
+
 
 
 
