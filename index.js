@@ -736,8 +736,166 @@ app.get("/api/analisis/ventas", authenticate, async (req, res) => {
     return res.status(500).json({ ok: false, error: "Error obteniendo datos." });
   }
 });
+/* =========================
+   TRAZABILIDAD - LOTES
+========================= */
+
+await db.execute(`
+  CREATE TABLE IF NOT EXISTS lotes (
+    id VARCHAR(64) PRIMARY KEY,
+    codigo VARCHAR(32) UNIQUE NOT NULL,
+    producto VARCHAR(100),
+    codigo_producto VARCHAR(20),
+    fecha_produccion VARCHAR(20),
+    hora_inicio VARCHAR(10),
+    hora_fin VARCHAR(10),
+    turno VARCHAR(20),
+    operario VARCHAR(100),
+    responsable_liberacion VARCHAR(100),
+    linea VARCHAR(100),
+    cantidad_kg DECIMAL(10,2),
+    estado VARCHAR(30) DEFAULT 'Liberado',
+    fecha_vencimiento VARCHAR(20),
+    observaciones TEXT,
+    created_at VARCHAR(64),
+    -- Proceso
+    temperatura DECIMAL(5,2),
+    limpieza_previa TINYINT(1) DEFAULT 0,
+    incidencias TEXT,
+    -- Insumos (JSON)
+    insumos JSON,
+    -- Calidad
+    inspeccion_visual VARCHAR(50),
+    control_temperatura VARCHAR(50),
+    liberado_por VARCHAR(100),
+    fecha_liberacion VARCHAR(20)
+  )
+`);
+
+// LISTAR LOTES
+app.get("/api/lotes", authenticate, async (req, res) => {
+  try {
+    const [rows] = await db.execute(
+      "SELECT id, codigo, producto, codigo_producto, fecha_produccion, turno, operario, cantidad_kg, estado, linea FROM lotes ORDER BY created_at DESC"
+    );
+    return res.json({ ok: true, lotes: rows });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error obteniendo lotes." });
+  }
+});
+
+// OBTENER LOTE POR ID
+app.get("/api/lotes/:id", authenticate, async (req, res) => {
+  try {
+    const [rows] = await db.execute("SELECT * FROM lotes WHERE id = ?", [req.params.id]);
+    if (!rows.length) return res.status(404).json({ ok: false, error: "Lote no encontrado." });
+    const lote = rows[0];
+    lote.insumos = typeof lote.insumos === "string" ? JSON.parse(lote.insumos || "[]") : (lote.insumos || []);
+
+    // Buscar facturas vinculadas por código de lote
+    const [facturas] = await db.execute(
+      "SELECT id, nro_documento, fecha, cliente, rut, monto_total_digits, detalle FROM documentos"
+    );
+    const vinculadas = facturas.filter(f => {
+      const det = typeof f.detalle === "string" ? JSON.parse(f.detalle || "{}") : (f.detalle || {});
+      const loteFactura = det.lote || "";
+      return loteFactura.trim().toUpperCase() === lote.codigo.trim().toUpperCase();
+    }).map(f => {
+      const det = typeof f.detalle === "string" ? JSON.parse(f.detalle || "{}") : (f.detalle || {});
+      return { id: f.id, nro_documento: f.nro_documento, fecha: f.fecha, cliente: f.cliente, rut: f.rut, total: f.monto_total_digits, items: det.items || [] };
+    });
+
+    return res.json({ ok: true, lote, facturas_vinculadas: vinculadas });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error obteniendo lote." });
+  }
+});
+
+// BUSCAR LOTES
+app.get("/api/lotes/buscar/:q", authenticate, async (req, res) => {
+  try {
+    const q = `%${req.params.q}%`;
+    const [rows] = await db.execute(
+      `SELECT id, codigo, producto, fecha_produccion, turno, operario, cantidad_kg, estado
+       FROM lotes WHERE codigo LIKE ? OR producto LIKE ? OR operario LIKE ? ORDER BY created_at DESC`,
+      [q, q, q]
+    );
+    return res.json({ ok: true, lotes: rows });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error en búsqueda." });
+  }
+});
+
+// CREAR LOTE
+app.post("/api/lotes", authenticate, async (req, res) => {
+  if (req.session.rol === "readonly") return res.status(403).json({ ok: false, error: "Sin permisos." });
+  try {
+    const {
+      codigo, producto, codigo_producto, fecha_produccion, hora_inicio, hora_fin,
+      turno, operario, responsable_liberacion, linea, cantidad_kg, estado,
+      fecha_vencimiento, observaciones, temperatura, limpieza_previa, incidencias,
+      insumos, inspeccion_visual, control_temperatura, liberado_por, fecha_liberacion
+    } = req.body;
+
+    if (!codigo) return res.status(400).json({ ok: false, error: "Falta código de lote." });
+
+    const [existing] = await db.execute("SELECT id FROM lotes WHERE codigo = ?", [codigo]);
+    if (existing.length > 0) return res.status(409).json({ ok: false, error: `El lote ${codigo} ya existe.` });
+
+    const id = "lot_" + Date.now().toString(36) + "_" + crypto.randomBytes(3).toString("hex");
+
+    await db.execute(
+      `INSERT INTO lotes (id, codigo, producto, codigo_producto, fecha_produccion, hora_inicio, hora_fin,
+        turno, operario, responsable_liberacion, linea, cantidad_kg, estado, fecha_vencimiento,
+        observaciones, created_at, temperatura, limpieza_previa, incidencias, insumos,
+        inspeccion_visual, control_temperatura, liberado_por, fecha_liberacion)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [id, codigo, producto, codigo_producto, fecha_produccion, hora_inicio, hora_fin,
+       turno, operario, responsable_liberacion, linea, cantidad_kg || 0, estado || "Liberado",
+       fecha_vencimiento, observaciones, new Date().toISOString(),
+       temperatura, limpieza_previa ? 1 : 0, incidencias,
+       JSON.stringify(insumos || []),
+       inspeccion_visual, control_temperatura, liberado_por, fecha_liberacion]
+    );
+
+    return res.json({ ok: true, id });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error guardando lote." });
+  }
+});
+
+// ACTUALIZAR ESTADO LOTE
+app.patch("/api/lotes/:id", authenticate, async (req, res) => {
+  if (req.session.rol === "readonly") return res.status(403).json({ ok: false, error: "Sin permisos." });
+  try {
+    const { estado, observaciones } = req.body;
+    await db.execute("UPDATE lotes SET estado = ?, observaciones = ? WHERE id = ?",
+      [estado, observaciones, req.params.id]);
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error actualizando lote." });
+  }
+});
+
+// ELIMINAR LOTE
+app.delete("/api/lotes/:id", authenticate, async (req, res) => {
+  if (req.session.rol !== "admin") return res.status(403).json({ ok: false, error: "Sin permisos." });
+  try {
+    await db.execute("DELETE FROM lotes WHERE id = ?", [req.params.id]);
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error eliminando lote." });
+  }
+});
 const PORT = process.env.PORT || 5050;
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
+
 
 
 
