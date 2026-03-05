@@ -56,7 +56,9 @@ await db.execute(`
 `);
 
 console.log("Base de datos conectada y lista.");
-
+try {
+  await db.execute("ALTER TABLE documentos ADD COLUMN lotes JSON");
+} catch(e) { /* ya existe */ }
 /* =========================
    USUARIOS Y AUTH
 ========================= */
@@ -449,15 +451,28 @@ app.get("/api/documentos/:id", authenticate, async (req, res) => {
     if (!rows.length) return res.status(404).json({ ok: false, error: "No encontrado." });
     const doc = rows[0];
     doc.detalle = typeof doc.detalle === "string" ? JSON.parse(doc.detalle) : doc.detalle;
-    return res.json({ ok: true, documento: doc });
     doc.lotes = typeof doc.lotes === "string" ? JSON.parse(doc.lotes || "[]") : (doc.lotes || []);
+    return res.json({ ok: true, documento: doc });
 
   } catch (err) {
     console.error(err);
     return res.status(500).json({ ok: false, error: "Error obteniendo documento." });
   }
 });
-
+// ACTUALIZAR LOTES DE UNA FACTURA
+app.patch("/api/documentos/:id/lotes", authenticate, async (req, res) => {
+  if (req.session.rol === "readonly") return res.status(403).json({ ok: false, error: "Sin permisos." });
+  try {
+    const { lotes } = req.body;
+    if (!Array.isArray(lotes)) return res.status(400).json({ ok: false, error: "Formato inválido." });
+    if (lotes.length > 10) return res.status(400).json({ ok: false, error: "Máximo 10 lotes por factura." });
+    await db.execute("UPDATE documentos SET lotes = ? WHERE id = ?", [JSON.stringify(lotes), req.params.id]);
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error actualizando lotes." });
+  }
+});
 // ELIMINAR UN DOCUMENTO (solo admin)
 app.delete("/api/documentos/:id", authenticate, async (req, res) => {
   if (req.session.rol !== "admin") return res.status(403).json({ ok: false, error: "Sin permisos." });
@@ -914,11 +929,3 @@ app.delete("/api/lotes/:id", authenticate, async (req, res) => {
 });
 const PORT = process.env.PORT || 5050;
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
-
-
-
-
-
-
-
-
