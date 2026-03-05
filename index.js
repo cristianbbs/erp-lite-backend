@@ -551,6 +551,95 @@ app.post("/api/verify-password", authenticate, (req, res) => {
   }
   return res.json({ ok: true });
 });
+/* =========================
+   COMPRAS
+========================= */
+
+await db.execute(`
+  CREATE TABLE IF NOT EXISTS compras (
+    id VARCHAR(64) PRIMARY KEY,
+    created_at VARCHAR(64),
+    rut VARCHAR(32),
+    proveedor VARCHAR(255),
+    tipo_documento VARCHAR(100),
+    nro_documento VARCHAR(32),
+    fecha VARCHAR(64),
+    neto BIGINT,
+    iva BIGINT,
+    descuento BIGINT DEFAULT 0,
+    total BIGINT,
+    items JSON
+  )
+`);
+
+// LISTAR COMPRAS
+app.get("/api/compras", authenticate, async (req, res) => {
+  try {
+    const [rows] = await db.execute(
+      "SELECT id, created_at, rut, proveedor, tipo_documento, nro_documento, fecha, neto, iva, descuento, total FROM compras ORDER BY CAST(nro_documento AS UNSIGNED) DESC"
+    );
+    return res.json({ ok: true, compras: rows });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error obteniendo compras." });
+  }
+});
+
+// OBTENER COMPRA POR ID
+app.get("/api/compras/:id", authenticate, async (req, res) => {
+  try {
+    const [rows] = await db.execute("SELECT * FROM compras WHERE id = ?", [req.params.id]);
+    if (!rows.length) return res.status(404).json({ ok: false, error: "No encontrado." });
+    const doc = rows[0];
+    doc.items = typeof doc.items === "string" ? JSON.parse(doc.items) : doc.items;
+    return res.json({ ok: true, compra: doc });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error obteniendo compra." });
+  }
+});
+
+// CREAR COMPRA
+app.post("/api/compras", authenticate, async (req, res) => {
+  if (req.session.rol === "readonly") return res.status(403).json({ ok: false, error: "Sin permisos." });
+  try {
+    const { rut, proveedor, tipo_documento, nro_documento, fecha, neto, iva, descuento, total, items } = req.body;
+    if (!nro_documento) return res.status(400).json({ ok: false, error: "Falta número de documento." });
+
+    const [existing] = await db.execute(
+      "SELECT id FROM compras WHERE CAST(nro_documento AS UNSIGNED) = CAST(? AS UNSIGNED)",
+      [nro_documento]
+    );
+    if (existing.length > 0) return res.status(409).json({ ok: false, error: `La factura ${nro_documento} ya existe.` });
+
+    const id = "cmp_" + Date.now().toString(36) + "_" + crypto.randomBytes(3).toString("hex");
+    const now = new Date().toISOString();
+
+    await db.execute(
+      `INSERT INTO compras (id, created_at, rut, proveedor, tipo_documento, nro_documento, fecha, neto, iva, descuento, total, items)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, now, rut, proveedor, tipo_documento, nro_documento, fecha, neto || 0, iva || 0, descuento || 0, total || 0, JSON.stringify(items || [])]
+    );
+
+    return res.json({ ok: true, id });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error guardando compra." });
+  }
+});
+
+// ELIMINAR COMPRA (solo admin)
+app.delete("/api/compras/:id", authenticate, async (req, res) => {
+  if (req.session.rol !== "admin") return res.status(403).json({ ok: false, error: "Sin permisos." });
+  try {
+    await db.execute("DELETE FROM compras WHERE id = ?", [req.params.id]);
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error eliminando compra." });
+  }
+});
 const PORT = process.env.PORT || 5050;
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
+
 
