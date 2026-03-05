@@ -639,7 +639,82 @@ app.delete("/api/compras/:id", authenticate, async (req, res) => {
     return res.status(500).json({ ok: false, error: "Error eliminando compra." });
   }
 });
+/* =========================
+   BOLETAS
+========================= */
+
+await db.execute(`
+  CREATE TABLE IF NOT EXISTS boletas (
+    id VARCHAR(64) PRIMARY KEY,
+    created_at VARCHAR(64),
+    nro_documento VARCHAR(32),
+    fecha VARCHAR(64),
+    neto BIGINT,
+    iva BIGINT,
+    total BIGINT,
+    items JSON
+  )
+`);
+
+app.get("/api/boletas", authenticate, async (req, res) => {
+  try {
+    const [rows] = await db.execute(
+      "SELECT id, created_at, nro_documento, fecha, neto, iva, total FROM boletas ORDER BY CAST(nro_documento AS UNSIGNED) DESC"
+    );
+    return res.json({ ok: true, boletas: rows });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error obteniendo boletas." });
+  }
+});
+
+app.get("/api/boletas/:id", authenticate, async (req, res) => {
+  try {
+    const [rows] = await db.execute("SELECT * FROM boletas WHERE id = ?", [req.params.id]);
+    if (!rows.length) return res.status(404).json({ ok: false, error: "No encontrado." });
+    const doc = rows[0];
+    doc.items = typeof doc.items === "string" ? JSON.parse(doc.items) : doc.items;
+    return res.json({ ok: true, boleta: doc });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error obteniendo boleta." });
+  }
+});
+
+app.post("/api/boletas", authenticate, async (req, res) => {
+  if (req.session.rol === "readonly") return res.status(403).json({ ok: false, error: "Sin permisos." });
+  try {
+    const { nro_documento, fecha, neto, iva, total, items } = req.body;
+    if (!nro_documento) return res.status(400).json({ ok: false, error: "Falta número de boleta." });
+    const [existing] = await db.execute(
+      "SELECT id FROM boletas WHERE CAST(nro_documento AS UNSIGNED) = CAST(? AS UNSIGNED)",
+      [nro_documento]
+    );
+    if (existing.length > 0) return res.status(409).json({ ok: false, error: `La boleta ${nro_documento} ya existe.` });
+    const id = "bol_" + Date.now().toString(36) + "_" + crypto.randomBytes(3).toString("hex");
+    await db.execute(
+      `INSERT INTO boletas (id, created_at, nro_documento, fecha, neto, iva, total, items) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, new Date().toISOString(), nro_documento, fecha, neto || 0, iva || 0, total || 0, JSON.stringify(items || [])]
+    );
+    return res.json({ ok: true, id });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error guardando boleta." });
+  }
+});
+
+app.delete("/api/boletas/:id", authenticate, async (req, res) => {
+  if (req.session.rol !== "admin") return res.status(403).json({ ok: false, error: "Sin permisos." });
+  try {
+    await db.execute("DELETE FROM boletas WHERE id = ?", [req.params.id]);
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error eliminando boleta." });
+  }
+});
 const PORT = process.env.PORT || 5050;
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
+
 
 
