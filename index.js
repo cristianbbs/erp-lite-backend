@@ -813,19 +813,34 @@ app.get("/api/lotes/:id", authenticate, async (req, res) => {
   }
 });
 
-// BUSCAR LOTES
+// BUSCAR LOTES (para autocomplete — máximo 1 mes hacia atrás desde fecha factura)
 app.get("/api/lotes/buscar/:q", authenticate, async (req, res) => {
   try {
     const q = `%${req.params.q}%`;
+    const fechaRef = req.query.fecha || null; // fecha de la factura DD-MM-YYYY
+    
+    let desde = null;
+    if (fechaRef) {
+      const m = fechaRef.match(/^(\d{2})-(\d{2})-(\d{4})$/);
+      if (m) {
+        const d = new Date(parseInt(m[3]), parseInt(m[2])-1, parseInt(m[1]));
+        d.setMonth(d.getMonth() - 1);
+        desde = d.toISOString().slice(0,10);
+      }
+    }
+
     const [rows] = await db.execute(
-      `SELECT id, codigo, producto, fecha_produccion, turno, operario, cantidad_kg, estado
-       FROM lotes WHERE codigo LIKE ? OR producto LIKE ? OR operario LIKE ? ORDER BY created_at DESC`,
-      [q, q, q]
+      `SELECT id, codigo, producto, fecha_produccion, turno, estado
+       FROM lotes 
+       WHERE (codigo LIKE ? OR producto LIKE ?)
+       ${desde ? "AND STR_TO_DATE(fecha_produccion, '%d-%m-%Y') >= ?" : ""}
+       ORDER BY created_at DESC LIMIT 20`,
+      desde ? [q, q, desde] : [q, q]
     );
     return res.json({ ok: true, lotes: rows });
   } catch (err) {
     console.error(err);
-    return res.status(500).json({ ok: false, error: "Error en búsqueda." });
+    return res.status(500).json({ ok: false, error: "Error buscando lotes." });
   }
 });
 
@@ -897,6 +912,7 @@ app.delete("/api/lotes/:id", authenticate, async (req, res) => {
 });
 const PORT = process.env.PORT || 5050;
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
+
 
 
 
