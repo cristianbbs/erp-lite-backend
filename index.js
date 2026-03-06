@@ -459,6 +459,37 @@ app.get("/api/documentos/:id", authenticate, async (req, res) => {
     return res.status(500).json({ ok: false, error: "Error obteniendo documento." });
   }
 });
+// ACTUALIZAR FACTURA COMPLETA (solo admin)
+app.patch("/api/documentos/:id", authenticate, async (req, res) => {
+  if (req.session.rol !== "admin") return res.status(403).json({ ok: false, error: "Sin permisos." });
+  try {
+    const { rut, cliente, tipo_documento, nro_documento, fecha, monto_total_digits, detalle } = req.body;
+    if (!nro_documento) return res.status(400).json({ ok: false, error: "Falta número de documento." });
+
+    // Verificar duplicado solo si cambió el número
+    const [current] = await db.execute("SELECT nro_documento FROM documentos WHERE id = ?", [req.params.id]);
+    if (!current.length) return res.status(404).json({ ok: false, error: "No encontrado." });
+
+    if (String(current[0].nro_documento) !== String(nro_documento)) {
+      const [existing] = await db.execute(
+        "SELECT id FROM documentos WHERE CAST(nro_documento AS UNSIGNED) = CAST(? AS UNSIGNED) AND id != ?",
+        [nro_documento, req.params.id]
+      );
+      if (existing.length > 0) return res.status(409).json({ ok: false, error: `La factura ${nro_documento} ya existe.` });
+    }
+
+    const montoDigits = String(monto_total_digits || "").replace(/[^\d]/g, "").replace(/^0+/, "") || "0";
+
+    await db.execute(
+      `UPDATE documentos SET rut=?, cliente=?, tipo_documento=?, nro_documento=?, fecha=?, monto_total_digits=?, detalle=? WHERE id=?`,
+      [rut, cliente, tipo_documento, nro_documento, fecha, montoDigits, JSON.stringify(detalle), req.params.id]
+    );
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error actualizando documento." });
+  }
+});
 // ACTUALIZAR LOTES DE UNA FACTURA
 app.patch("/api/documentos/:id/lotes", authenticate, async (req, res) => {
   if (req.session.rol === "readonly") return res.status(403).json({ ok: false, error: "Sin permisos." });
@@ -931,6 +962,7 @@ app.delete("/api/lotes/:id", authenticate, async (req, res) => {
 });
 const PORT = process.env.PORT || 5050;
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
+
 
 
 
