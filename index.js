@@ -937,17 +937,85 @@ app.post("/api/lotes", authenticate, async (req, res) => {
 
 // ACTUALIZAR ESTADO LOTE
 app.patch("/api/lotes/:id", authenticate, async (req, res) => {
-  if (req.session.rol === "readonly") return res.status(403).json({ ok: false, error: "Sin permisos." });
+  const { id } = req.params;
+  const {
+    estado,
+    producto, codigo_producto, fecha_produccion, turno,
+    operario, responsable_liberacion, linea, cantidad_kg,
+    fecha_vencimiento, observaciones,
+    hora_inicio, hora_fin, temperatura, limpieza_previa, incidencias,
+    inspeccion_visual, control_temperatura, liberado_por,
+    insumos,
+  } = req.body;
+
   try {
-    const { estado, observaciones } = req.body;
-    await db.execute("UPDATE lotes SET estado = ?, observaciones = ? WHERE id = ?",
-      [estado, observaciones, req.params.id]);
+    // Si solo viene { estado }, es el cambio rápido de estado (compatibilidad)
+    if (Object.keys(req.body).length === 1 && estado !== undefined) {
+      await db.execute(
+        "UPDATE lotes SET estado=? WHERE id=?",
+        [estado, id]
+      );
+      return res.json({ ok: true });
+    }
+
+    // Edición completa
+    const insumosJson = insumos ? JSON.stringify(insumos) : null;
+
+    await db.execute(
+      `UPDATE lotes SET
+        estado               = COALESCE(?, estado),
+        producto             = COALESCE(?, producto),
+        codigo_producto      = COALESCE(?, codigo_producto),
+        fecha_produccion     = COALESCE(?, fecha_produccion),
+        turno                = COALESCE(?, turno),
+        operario             = COALESCE(?, operario),
+        responsable_liberacion = COALESCE(?, responsable_liberacion),
+        linea                = COALESCE(?, linea),
+        cantidad_kg          = COALESCE(?, cantidad_kg),
+        fecha_vencimiento    = COALESCE(?, fecha_vencimiento),
+        observaciones        = COALESCE(?, observaciones),
+        hora_inicio          = COALESCE(?, hora_inicio),
+        hora_fin             = COALESCE(?, hora_fin),
+        temperatura          = COALESCE(?, temperatura),
+        limpieza_previa      = COALESCE(?, limpieza_previa),
+        incidencias          = COALESCE(?, incidencias),
+        inspeccion_visual    = COALESCE(?, inspeccion_visual),
+        control_temperatura  = COALESCE(?, control_temperatura),
+        liberado_por         = COALESCE(?, liberado_por),
+        insumos              = COALESCE(?, insumos)
+      WHERE id = ?`,
+      [
+        estado             ?? null,
+        producto           ?? null,
+        codigo_producto    ?? null,
+        fecha_produccion   ?? null,
+        turno              ?? null,
+        operario           ?? null,
+        responsable_liberacion ?? null,
+        linea              ?? null,
+        cantidad_kg        ?? null,
+        fecha_vencimiento  ?? null,
+        observaciones      ?? null,
+        hora_inicio        ?? null,
+        hora_fin           ?? null,
+        temperatura        ?? null,
+        limpieza_previa    !== undefined ? (limpieza_previa ? 1 : 0) : null,
+        incidencias        ?? null,
+        inspeccion_visual  ?? null,
+        control_temperatura ?? null,
+        liberado_por       ?? null,
+        insumosJson,
+        id,
+      ]
+    );
+
     return res.json({ ok: true });
   } catch (err) {
     console.error(err);
     return res.status(500).json({ ok: false, error: "Error actualizando lote." });
   }
 });
+
 
 // ELIMINAR LOTE
 app.delete("/api/lotes/:id", authenticate, async (req, res) => {
@@ -962,6 +1030,7 @@ app.delete("/api/lotes/:id", authenticate, async (req, res) => {
 });
 const PORT = process.env.PORT || 5050;
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
+
 
 
 
