@@ -940,6 +940,7 @@ app.patch("/api/lotes/:id", authenticate, async (req, res) => {
   const { id } = req.params;
   const {
     estado,
+    codigo,
     producto, codigo_producto, fecha_produccion, turno,
     operario, responsable_liberacion, linea, cantidad_kg,
     fecha_vencimiento, observaciones,
@@ -964,6 +965,8 @@ app.patch("/api/lotes/:id", authenticate, async (req, res) => {
     await db.execute(
       `UPDATE lotes SET
         estado               = COALESCE(?, estado),
+        codigo               = COALESCE(?, codigo),
+        lote                 = COALESCE(?, codigo),
         producto             = COALESCE(?, producto),
         codigo_producto      = COALESCE(?, codigo_producto),
         fecha_produccion     = COALESCE(?, fecha_produccion),
@@ -986,6 +989,8 @@ app.patch("/api/lotes/:id", authenticate, async (req, res) => {
       WHERE id = ?`,
       [
         estado             ?? null,
+        codigo             ?? null,
+        codigo             ?? null,  // también para campo lote
         producto           ?? null,
         codigo_producto    ?? null,
         fecha_produccion   ?? null,
@@ -1029,3 +1034,4 @@ app.delete("/api/lotes/:id", authenticate, async (req, res) => {
 });
 const PORT = process.env.PORT || 5050;
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
+
