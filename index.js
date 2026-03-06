@@ -1027,7 +1027,77 @@ app.delete("/api/lotes/:id", authenticate, async (req, res) => {
   }
 });
 const PORT = process.env.PORT || 5050;
+/* =========================
+   CLIENTES
+========================= */
+
+// Upsert cliente (llamado internamente al subir factura)
+async function upsertCliente(rut, datos) {
+  if (!rut) return;
+  const id = "cli_" + rut.replace(/[^a-z0-9]/gi, "");
+  const [rows] = await db.execute("SELECT id, primera_compra FROM clientes WHERE rut = ?", [rut]);
+  if (rows.length === 0) {
+    await db.execute(
+      `INSERT INTO clientes (id, rut, razon_social, giro, direccion, comuna, ciudad, primera_compra)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, rut,
+       datos.razon_social || null,
+       datos.giro         || null,
+       datos.direccion    || null,
+       datos.comuna       || null,
+       datos.ciudad       || null,
+       datos.fecha        || null]
+    );
+  }
+}
+
+// GET todos los clientes
+app.get("/api/clientes", authenticate, async (req, res) => {
+  try {
+    const [rows] = await db.execute(
+      "SELECT * FROM clientes ORDER BY razon_social ASC"
+    );
+    return res.json({ ok: true, clientes: rows });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error obteniendo clientes." });
+  }
+});
+
+// GET cliente por RUT + historial de facturas
+app.get("/api/clientes/:rut", authenticate, async (req, res) => {
+  try {
+    const rut = decodeURIComponent(req.params.rut);
+    const [cli] = await db.execute("SELECT * FROM clientes WHERE rut = ?", [rut]);
+    if (!cli.length) return res.status(404).json({ ok: false, error: "Cliente no encontrado." });
+    const [facturas] = await db.execute(
+      "SELECT id, nro_documento, fecha, tipo_documento, monto_total_digits, detalle, lotes FROM documentos WHERE rut = ? ORDER BY fecha DESC",
+      [rut]
+    );
+    return res.json({ ok: true, cliente: cli[0], facturas });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error obteniendo cliente." });
+  }
+});
+
+// PATCH actualizar cliente
+app.patch("/api/clientes/:rut", authenticate, async (req, res) => {
+  if (!["admin","editor"].includes(req.session.rol))
+    return res.status(403).json({ ok: false, error: "Sin permisos." });
+  try {
+    const rut = decodeURIComponent(req.params.rut);
+    const { razon_social, giro, direccion, comuna, ciudad, contacto, telefono, email, notas, primera_compra } = req.body;
+    await db.execute(
+      `UPDATE clientes SET razon_social=?, giro=?, direccion=?, comuna=?, ciudad=?,
+       contacto=?, telefono=?, email=?, notas=?, primera_compra=? WHERE rut=?`,
+      [razon_social||null, giro||null, direccion||null, comuna||null, ciudad||null,
+       contacto||null, telefono||null, email||null, notas||null, primera_compra||null, rut]
+    );
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error actualizando cliente." });
+  }
+});
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
-
-
-
