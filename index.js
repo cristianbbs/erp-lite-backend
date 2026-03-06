@@ -902,32 +902,28 @@ app.post("/api/lotes", authenticate, async (req, res) => {
       codigo, producto, codigo_producto, fecha_produccion, hora_inicio, hora_fin,
       turno, operario, responsable_liberacion, linea, cantidad_kg, estado,
       fecha_vencimiento, observaciones, temperatura, limpieza_previa, incidencias,
-      insumos, inspeccion_visual, control_temperatura, liberado_por, fecha_liberacion
+      insumos, productos, inspeccion_visual, control_temperatura, liberado_por, fecha_liberacion
     } = req.body;
-
     if (!codigo) return res.status(400).json({ ok: false, error: "Falta código de lote." });
-
     const [existing] = await db.execute("SELECT id FROM lotes WHERE codigo = ?", [codigo]);
     if (existing.length > 0) return res.status(409).json({ ok: false, error: `El lote ${codigo} ya existe.` });
-
     const id = "lot_" + Date.now().toString(36) + "_" + crypto.randomBytes(3).toString("hex");
-
     const nullify = v => (v === undefined || v === "" ? null : v);
-    
+
     await db.execute(
       `INSERT INTO lotes (id, codigo, producto, codigo_producto, fecha_produccion, hora_inicio, hora_fin,
         turno, operario, responsable_liberacion, linea, cantidad_kg, estado, fecha_vencimiento,
-        observaciones, created_at, temperatura, limpieza_previa, incidencias, insumos,
+        observaciones, created_at, temperatura, limpieza_previa, incidencias, insumos, productos,
         inspeccion_visual, control_temperatura, liberado_por, fecha_liberacion)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [id, codigo, nullify(producto), nullify(codigo_producto), nullify(fecha_produccion), nullify(hora_inicio), nullify(hora_fin),
        nullify(turno), nullify(operario), nullify(responsable_liberacion), nullify(linea), cantidad_kg || 0, estado || "Liberado",
        nullify(fecha_vencimiento), nullify(observaciones), new Date().toISOString(),
        temperatura != null ? temperatura : null, limpieza_previa ? 1 : 0, nullify(incidencias),
        JSON.stringify(insumos || []),
+       JSON.stringify(productos || []),
        nullify(inspeccion_visual), nullify(control_temperatura), nullify(liberado_por), nullify(fecha_liberacion)]
     );
-
     return res.json({ ok: true, id });
   } catch (err) {
     console.error(err);
@@ -947,20 +943,17 @@ app.patch("/api/lotes/:id", authenticate, async (req, res) => {
     hora_inicio, hora_fin, temperatura, limpieza_previa, incidencias,
     inspeccion_visual, control_temperatura, liberado_por,
     insumos,
+    productos,
   } = req.body;
 
   try {
-    // Si solo viene { estado }, es el cambio rápido de estado (compatibilidad)
     if (Object.keys(req.body).length === 1 && estado !== undefined) {
-      await db.execute(
-        "UPDATE lotes SET estado=? WHERE id=?",
-        [estado, id]
-      );
+      await db.execute("UPDATE lotes SET estado=? WHERE id=?", [estado, id]);
       return res.json({ ok: true });
     }
 
-    // Edición completa
-    const insumosJson = insumos ? JSON.stringify(insumos) : null;
+    const insumosJson   = insumos   ? JSON.stringify(insumos)   : null;
+    const productosJson = productos ? JSON.stringify(productos) : null;
 
     await db.execute(
       `UPDATE lotes SET
@@ -985,12 +978,13 @@ app.patch("/api/lotes/:id", authenticate, async (req, res) => {
         inspeccion_visual    = COALESCE(?, inspeccion_visual),
         control_temperatura  = COALESCE(?, control_temperatura),
         liberado_por         = COALESCE(?, liberado_por),
-        insumos              = COALESCE(?, insumos)
+        insumos              = COALESCE(?, insumos),
+        productos            = COALESCE(?, productos)
       WHERE id = ?`,
       [
         estado             ?? null,
         codigo             ?? null,
-        codigo             ?? null,  // también para campo lote
+        codigo             ?? null,
         producto           ?? null,
         codigo_producto    ?? null,
         fecha_produccion   ?? null,
@@ -1010,6 +1004,7 @@ app.patch("/api/lotes/:id", authenticate, async (req, res) => {
         control_temperatura ?? null,
         liberado_por       ?? null,
         insumosJson,
+        productosJson,
         id,
       ]
     );
@@ -1034,4 +1029,5 @@ app.delete("/api/lotes/:id", authenticate, async (req, res) => {
 });
 const PORT = process.env.PORT || 5050;
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
+
 
