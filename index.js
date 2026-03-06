@@ -539,39 +539,31 @@ app.post("/api/upload-pdf", authenticate, upload.single("pdf"), async (req, res)
     const parsed = await pdf(req.file.buffer);
     const text = normalizeText(parsed.text);
     if (!text || text.length < 30) return res.status(422).json({ ok: false, error: "No se pudo leer texto suficiente. ¿Seguro que es PDF nativo?" });
-
     const fields = extractFacturaKolderStyle(text);
     const nro = String(fields?.numero_documento || "").trim();
     if (!nro) return res.status(422).json({ ok: false, error: "No se detectó el número de documento." });
-
     // Verificar duplicado
     const [existing] = await db.execute(
       "SELECT id FROM documentos WHERE CAST(nro_documento AS UNSIGNED) = CAST(? AS UNSIGNED)",
       [nro]
     );
     if (existing.length > 0) return res.status(409).json({ ok: false, error: `La factura ${nro} ya existe.` });
-
     const id = "doc_" + Date.now().toString(36) + "_" + crypto.randomBytes(3).toString("hex");
     const now = new Date().toISOString();
-
     // Extraer lote
     const items = fields?.items || [];
     const joined = items.map(it => it?.descripcion || "").join("\n");
     const loteMatch = joined.match(/LOTE\s*:\s*([A-Za-z0-9\-_.]+)/i);
     const lote = loteMatch ? loteMatch[1].trim() : "";
-
     // Normalizar RUT
     const rut = (fields?.rut || "").replace(/\s+/g, "").trim();
-
     // Normalizar monto
     const montoRaw = fields?.total || "";
     const monto_total_digits = String(montoRaw).replace(/[^\d]/g, "").replace(/^0+/, "") || "0";
-
     // Normalizar fecha
     const fechaRaw = fields?.fecha_emision || "";
     const fechaMatch = String(fechaRaw).match(/\b(\d{2})[\/-](\d{2})[\/-](\d{4})\b/);
     const fecha = fechaMatch ? `${fechaMatch[1]}-${fechaMatch[2]}-${fechaMatch[3]}` : String(fechaRaw).trim();
-
     await db.execute(
       `INSERT INTO documentos (id, created_at, source_name, rut, cliente, tipo_documento, nro_documento, fecha, monto_total_digits, lote, detalle, preview)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -585,7 +577,15 @@ app.post("/api/upload-pdf", authenticate, upload.single("pdf"), async (req, res)
         text.slice(0, 2500),
       ]
     );
-
+    // Auto-registrar cliente
+    await upsertCliente(rut, {
+      razon_social: (fields?.razon_social || "").trim(),
+      giro:         fields?.giro      || "",
+      direccion:    fields?.direccion || "",
+      comuna:       fields?.comuna    || "",
+      ciudad:       fields?.ciudad    || "",
+      fecha
+    });
     return res.json({ ok: true, fields, preview: text.slice(0, 2500), meta: { pages: parsed.numpages || null } });
   } catch (err) {
     console.error(err);
@@ -1101,3 +1101,4 @@ app.patch("/api/clientes/:rut", authenticate, async (req, res) => {
   }
 });
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
+
