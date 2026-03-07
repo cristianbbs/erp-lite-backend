@@ -583,6 +583,28 @@ app.post("/api/upload-pdf", authenticate, upload.single("pdf"), async (req, res)
       "SELECT id FROM cobranzas WHERE nro_documento = ?", [nro]
     );
     if (!cobExist.length) {
+      // Leer días de crédito del cliente
+      let diasCredito = 0;
+      try {
+        const [clienteRows] = await db.execute(
+          "SELECT dias_credito FROM clientes WHERE rut = ?", [rut]
+        );
+        if (clienteRows.length) diasCredito = clienteRows[0].dias_credito || 0;
+      } catch(e) { /* si falla, queda en 0 */ }
+
+      // Calcular fecha vencimiento
+      let fechaVenc = fecha;
+      if (diasCredito > 0 && fecha) {
+        try {
+          const partes = fecha.split("-"); // DD-MM-YYYY
+          const d = new Date(parseInt(partes[2]), parseInt(partes[1])-1, parseInt(partes[0]));
+          d.setDate(d.getDate() + diasCredito);
+          const dd = String(d.getDate()).padStart(2,"0");
+          const mm = String(d.getMonth()+1).padStart(2,"0");
+          fechaVenc = `${dd}-${mm}-${d.getFullYear()}`;
+        } catch(e) { fechaVenc = fecha; }
+      }
+
       await db.execute(
         `INSERT INTO cobranzas
           (id, documento_id, nro_documento, rut, cliente, fecha_factura,
@@ -593,8 +615,8 @@ app.post("/api/upload-pdf", authenticate, upload.single("pdf"), async (req, res)
           (fields?.razon_social || "").trim(),
           fecha,
           parseInt(monto_total_digits) || 0,
-          0,
-          fecha, // vencimiento = misma fecha (contado por defecto)
+          diasCredito,
+          fechaVenc,
           "Pendiente",
           now, now
         ]
@@ -1118,13 +1140,19 @@ app.patch("/api/clientes/:rut", authenticate, async (req, res) => {
     return res.status(403).json({ ok: false, error: "Sin permisos." });
   try {
     const rut = decodeURIComponent(req.params.rut);
-    const { razon_social, giro, direccion, comuna, ciudad, contacto, telefono, email, notas, primera_compra } = req.body;
+    const { razon_social, giro, direccion, comuna, ciudad,
+            contacto, telefono, email, notas, primera_compra,
+            dias_credito } = req.body;
     await db.execute(
-      `UPDATE clientes SET razon_social=?, giro=?, direccion=?, comuna=?, ciudad=?,
-       contacto=?, telefono=?, email=?, notas=?, primera_compra=? WHERE rut=?`,
-      [razon_social||null, giro||null, direccion||null, comuna||null, ciudad||null,
-       contacto||null, telefono||null, email||null, notas||null, primera_compra||null, rut]
-    );
+      `UPDATE clientes SET razon_social = ?, giro = ?, direccion = ?, comuna = ?, ciudad = ?,
+          contacto = ?, telefono = ?, email = ?, notas = ?, primera_compra = ?,
+          dias_credito = ?,
+          updated_at = ?
+      WHERE rut = ?`,
+      [razon_social, giro, direccion, comuna, ciudad,
+       contacto, telefono, email, notas, primera_compra,
+       dias_credito ?? 0,
+       now, rut]
     return res.json({ ok: true });
   } catch (err) {
     console.error(err);
@@ -1325,6 +1353,7 @@ app.delete("/api/cobranzas/:id", authenticate, async (req, res) => {
   }
 });
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
+
 
 
 
