@@ -1035,18 +1035,26 @@ const PORT = process.env.PORT || 5050;
 async function upsertCliente(rut, datos) {
   if (!rut) return;
   const id = "cli_" + rut.replace(/[^a-z0-9]/gi, "");
+  const fechaDate = datos.fecha ? datos.fecha.slice(0,10) : null;
   const [rows] = await db.execute("SELECT id, primera_compra FROM clientes WHERE rut = ?", [rut]);
   if (rows.length === 0) {
     await db.execute(
-      `INSERT INTO clientes (id, rut, razon_social, giro, direccion, comuna, ciudad, primera_compra)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO clientes (id, rut, razon_social, giro, direccion, comuna, ciudad, primera_compra, ultima_factura)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [id, rut,
        datos.razon_social || null,
        datos.giro         || null,
        datos.direccion    || null,
        datos.comuna       || null,
        datos.ciudad       || null,
-       datos.fecha        || null]
+       fechaDate          || null,
+       fechaDate          || null]
+    );
+  } else {
+    // Actualizar ultima_factura si la fecha nueva es más reciente
+    await db.execute(
+      `UPDATE clientes SET ultima_factura = GREATEST(COALESCE(ultima_factura, '2000-01-01'), COALESCE(?, '2000-01-01')) WHERE rut = ?`,
+      [fechaDate, rut]
     );
   }
 }
@@ -1151,5 +1159,6 @@ app.patch("/api/lotes/:id/adjuntos", authenticate, async (req, res) => {
   }
 });
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
+
 
 
