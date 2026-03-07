@@ -1189,7 +1189,7 @@ app.patch("/api/lotes/:id/adjuntos", authenticate, async (req, res) => {
 app.get("/api/cobranzas", authenticate, async (req, res) => {
   try {
     const [rows] = await db.execute(
-      "SELECT * FROM cobranzas ORDER BY fecha_vencimiento ASC"
+      "SELECT * FROM cobranzas ORDER BY fecha_factura DESC"
     );
     return res.json({ ok: true, cobranzas: rows });
   } catch (err) {
@@ -1325,6 +1325,7 @@ app.delete("/api/cobranzas/:id", authenticate, async (req, res) => {
   }
 });
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
+
 
 
 
