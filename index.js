@@ -1158,7 +1158,151 @@ app.patch("/api/lotes/:id/adjuntos", authenticate, async (req, res) => {
     return res.status(500).json({ ok: false, error: "Error guardando adjunto." });
   }
 });
+/* =========================
+   COBRANZA
+========================= */
+
+// LISTAR COBRANZAS
+app.get("/api/cobranzas", authenticate, async (req, res) => {
+  try {
+    const [rows] = await db.execute(
+      "SELECT * FROM cobranzas ORDER BY fecha_vencimiento ASC"
+    );
+    return res.json({ ok: true, cobranzas: rows });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error obteniendo cobranzas." });
+  }
+});
+
+// OBTENER UNA COBRANZA
+app.get("/api/cobranzas/:id", authenticate, async (req, res) => {
+  try {
+    const [rows] = await db.execute("SELECT * FROM cobranzas WHERE id = ?", [req.params.id]);
+    if (!rows.length) return res.status(404).json({ ok: false, error: "No encontrada." });
+    return res.json({ ok: true, cobranza: rows[0] });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error obteniendo cobranza." });
+  }
+});
+
+// CREAR COBRANZA
+app.post("/api/cobranzas", authenticate, async (req, res) => {
+  if (!["admin","editor"].includes(req.session.rol))
+    return res.status(403).json({ ok: false, error: "Sin permisos." });
+  try {
+    const {
+      documento_id, nro_documento, rut, cliente, fecha_factura,
+      monto_total, dias_credito, fecha_vencimiento, estado,
+      forma_pago, fecha_pago, monto_pagado, nro_operacion,
+      tipo_cheque, fecha_cheque, banco, notas
+    } = req.body;
+    if (!nro_documento) return res.status(400).json({ ok: false, error: "Falta número de documento." });
+
+    // Verificar duplicado
+    const [existing] = await db.execute(
+      "SELECT id FROM cobranzas WHERE nro_documento = ?", [nro_documento]
+    );
+    if (existing.length > 0)
+      return res.status(409).json({ ok: false, error: `Ya existe cobranza para factura ${nro_documento}.` });
+
+    const id  = "cob_" + Date.now().toString(36) + "_" + crypto.randomBytes(3).toString("hex");
+    const now = new Date().toISOString();
+    const nullify = v => (v === undefined || v === "" ? null : v);
+
+    await db.execute(
+      `INSERT INTO cobranzas
+        (id, documento_id, nro_documento, rut, cliente, fecha_factura,
+         monto_total, dias_credito, fecha_vencimiento, estado,
+         forma_pago, fecha_pago, monto_pagado, nro_operacion,
+         tipo_cheque, fecha_cheque, banco, notas, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [id, nullify(documento_id), nro_documento, nullify(rut), nullify(cliente),
+       nullify(fecha_factura), monto_total||0, dias_credito||0,
+       nullify(fecha_vencimiento), estado||"Pendiente",
+       nullify(forma_pago), nullify(fecha_pago), monto_pagado||0,
+       nullify(nro_operacion), nullify(tipo_cheque), nullify(fecha_cheque),
+       nullify(banco), nullify(notas), now, now]
+    );
+    return res.json({ ok: true, id });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error creando cobranza." });
+  }
+});
+
+// ACTUALIZAR COBRANZA
+app.patch("/api/cobranzas/:id", authenticate, async (req, res) => {
+  if (!["admin","editor"].includes(req.session.rol))
+    return res.status(403).json({ ok: false, error: "Sin permisos." });
+  try {
+    const {
+      estado, forma_pago, fecha_pago, monto_pagado, nro_operacion,
+      tipo_cheque, fecha_cheque, banco, notas,
+      dias_credito, fecha_vencimiento, monto_total, cliente, rut
+    } = req.body;
+    const now = new Date().toISOString();
+    const nullify = v => (v === undefined ? undefined : (v === "" ? null : v));
+
+    await db.execute(
+      `UPDATE cobranzas SET
+        estado            = COALESCE(?, estado),
+        forma_pago        = ?,
+        fecha_pago        = ?,
+        monto_pagado      = COALESCE(?, monto_pagado),
+        nro_operacion     = ?,
+        tipo_cheque       = ?,
+        fecha_cheque      = ?,
+        banco             = ?,
+        notas             = ?,
+        dias_credito      = COALESCE(?, dias_credito),
+        fecha_vencimiento = COALESCE(?, fecha_vencimiento),
+        monto_total       = COALESCE(?, monto_total),
+        cliente           = COALESCE(?, cliente),
+        rut               = COALESCE(?, rut),
+        updated_at        = ?
+      WHERE id = ?`,
+      [
+        estado            ?? null,
+        forma_pago        ?? null,
+        fecha_pago        ?? null,
+        monto_pagado      ?? null,
+        nro_operacion     ?? null,
+        tipo_cheque       ?? null,
+        fecha_cheque      ?? null,
+        banco             ?? null,
+        notas             ?? null,
+        dias_credito      ?? null,
+        fecha_vencimiento ?? null,
+        monto_total       ?? null,
+        cliente           ?? null,
+        rut               ?? null,
+        now,
+        req.params.id
+      ]
+    );
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error actualizando cobranza." });
+  }
+});
+
+// ELIMINAR COBRANZA
+app.delete("/api/cobranzas/:id", authenticate, async (req, res) => {
+  if (req.session.rol !== "admin")
+    return res.status(403).json({ ok: false, error: "Sin permisos." });
+  try {
+    await db.execute("DELETE FROM cobranzas WHERE id = ?", [req.params.id]);
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error eliminando cobranza." });
+  }
+});
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
+
 
 
 
