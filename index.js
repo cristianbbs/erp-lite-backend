@@ -577,6 +577,29 @@ app.post("/api/upload-pdf", authenticate, upload.single("pdf"), async (req, res)
         text.slice(0, 2500),
       ]
     );
+    // Auto-crear cobranza pendiente
+    const cobId = "cob_" + Date.now().toString(36) + "_" + crypto.randomBytes(3).toString("hex");
+    const [cobExist] = await db.execute(
+      "SELECT id FROM cobranzas WHERE nro_documento = ?", [nro]
+    );
+    if (!cobExist.length) {
+      await db.execute(
+        `INSERT INTO cobranzas
+          (id, documento_id, nro_documento, rut, cliente, fecha_factura,
+           monto_total, dias_credito, fecha_vencimiento, estado, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+        [
+          cobId, id, nro, rut,
+          (fields?.razon_social || "").trim(),
+          fecha,
+          parseInt(monto_total_digits) || 0,
+          0,
+          fecha, // vencimiento = misma fecha (contado por defecto)
+          "Pendiente",
+          now, now
+        ]
+      );
+    }
     // Auto-registrar cliente
     await upsertCliente(rut, {
       razon_social: (fields?.razon_social || "").trim(),
@@ -1302,6 +1325,7 @@ app.delete("/api/cobranzas/:id", authenticate, async (req, res) => {
   }
 });
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
+
 
 
 
