@@ -435,7 +435,7 @@ app.get("/api/me", authenticate, (req, res) => {
 app.get("/api/documentos", authenticate, async (req, res) => {
   try {
     const [rows] = await db.execute(
-      "SELECT id, created_at, source_name, rut, cliente, tipo_documento, nro_documento, fecha, monto_total_digits, lote FROM documentos ORDER BY CAST(nro_documento AS UNSIGNED) DESC"
+     "SELECT id, created_at, source_name, rut, cliente, tipo_documento, nro_documento, fecha, monto_total_digits, lote, nro_orden_compra FROM documentos ORDER BY CAST(nro_documento AS UNSIGNED) DESC" 
     );
     return res.json({ ok: true, documentos: rows });
   } catch (err) {
@@ -1100,5 +1100,56 @@ app.patch("/api/clientes/:rut", authenticate, async (req, res) => {
     return res.status(500).json({ ok: false, error: "Error actualizando cliente." });
   }
 });
+// ── ADJUNTOS FACTURA ──────────────────────────────────────────────────────
+app.patch("/api/documentos/:id/adjuntos", authenticate, async (req, res) => {
+  if (!["admin","editor"].includes(req.session.rol))
+    return res.status(403).json({ ok: false, error: "Sin permisos." });
+  try {
+    const camposPermitidos = [
+      "nro_orden_compra",
+      "adj_orden_compra", "adj_orden_compra_nombre",
+      "adj_organoléptico", "adj_organoléptico_nombre",
+      "adj_guia_despacho", "adj_guia_despacho_nombre"
+    ];
+    const { campo, valor, nombre } = req.body;
+    if (!camposPermitidos.includes(campo))
+      return res.status(400).json({ ok: false, error: "Campo no permitido." });
+    const updates = [[campo, valor ?? null]];
+    if (campo.startsWith("adj_") && !campo.endsWith("_nombre")) {
+      updates.push([`${campo}_nombre`, valor ? (nombre ?? null) : null]);
+    }
+    for (const [col, val] of updates) {
+      await db.execute(`UPDATE documentos SET \`${col}\` = ? WHERE id = ?`, [val, req.params.id]);
+    }
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error guardando adjunto." });
+  }
+});
+
+// ── ADJUNTOS LOTE ─────────────────────────────────────────────────────────
+app.patch("/api/lotes/:id/adjuntos", authenticate, async (req, res) => {
+  if (!["admin","editor"].includes(req.session.rol))
+    return res.status(403).json({ ok: false, error: "Sin permisos." });
+  try {
+    const { campo, valor, nombre } = req.body;
+    const camposPermitidos = ["adj_organoléptico", "adj_organoléptico_nombre"];
+    if (!camposPermitidos.includes(campo))
+      return res.status(400).json({ ok: false, error: "Campo no permitido." });
+    const updates = [[campo, valor ?? null]];
+    if (campo.startsWith("adj_") && !campo.endsWith("_nombre")) {
+      updates.push([`${campo}_nombre`, valor ? (nombre ?? null) : null]);
+    }
+    for (const [col, val] of updates) {
+      await db.execute(`UPDATE lotes SET \`${col}\` = ? WHERE id = ?`, [val, req.params.id]);
+    }
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error guardando adjunto." });
+  }
+});
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
+
 
