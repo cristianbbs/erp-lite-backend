@@ -564,9 +564,19 @@ app.post("/api/upload-pdf", authenticate, upload.single("pdf"), async (req, res)
     const fechaRaw = fields?.fecha_emision || "";
     const fechaMatch = String(fechaRaw).match(/\b(\d{2})[\/-](\d{2})[\/-](\d{4})\b/);
     const fecha = fechaMatch ? `${fechaMatch[1]}-${fechaMatch[2]}-${fechaMatch[3]}` : String(fechaRaw).trim();
+// Detectar si es nota de crédito y extraer factura que anula
+    const esNotaCredito = /nota de cr[eé]dito/i.test(fields?.tipo_documento || "");
+    let anulaDocumento = null;
+    if (esNotaCredito) {
+      const mRef = text.match(/Fact[ura\.]*\s*Electr[óo]nica\s*N[°º]?\s*(\d+)/i)
+                || text.match(/ANULA\s+DOCUMENTO.*?N[°º]?\s*(\d+)/i)
+                || text.match(/referencia.*?N[°º]?\s*(\d+)/i);
+      if (mRef) anulaDocumento = mRef[1].trim();
+    }
+
     await db.execute(
-      `INSERT INTO documentos (id, created_at, source_name, rut, cliente, tipo_documento, nro_documento, fecha, monto_total_digits, lote, detalle, preview)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO documentos (id, created_at, source_name, rut, cliente, tipo_documento, nro_documento, fecha, monto_total_digits, lote, detalle, preview, anula_documento, anulada)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
       [
         id, now, req.file.originalname,
         rut,
@@ -575,13 +585,70 @@ app.post("/api/upload-pdf", authenticate, upload.single("pdf"), async (req, res)
         nro, fecha, monto_total_digits, lote,
         JSON.stringify(fields),
         text.slice(0, 2500),
+        anulaDocumento,
       ]
     );
-    // Auto-crear cobranza pendiente
-    const cobId = "cob_" + Date.now().toString(36) + "_" + crypto.randomBytes(3).toString("hex");
-    const [cobExist] = await db.execute(
-      "SELECT id FROM cobranzas WHERE nro_documento = ?", [nro]
-    );
+
+    // Si es nota de crédito, marcar factura original como anulada
+    if (esNotaCredito && anulaDocumento) {
+      try {
+        // Marcar documento como anulado
+        await db.execute(
+          "UPDATE documentos SET anulada = 1 WHERE nro_documento = ? AND (anulada IS NULL OR anulada = 0)",
+          [anulaDocumento]
+        );
+        // Actualizar cobranza a "Nota de crédito"
+        await db.execute(
+          "UPDATE cobranzas SET estado = 'Nota de crédito', updated_at = ? WHERE nro_documento = ?",
+          [now, anulaDocumento]
+        );
+      } catch(e) { console.error("Error marcando anulación:", e); }
+    }
+
+if (esFactura) {
+      const cobId = "cob_" + Date.now().toString(36) + "_" + crypto.randomBytes(3).toString("hex");
+      const [cobExist] = await db.execute(
+        "SELECT id FROM cobranzas WHERE nro_documento = ?", [nro]
+      );
+      if (!cobExist.length) {
+        let diasCredito = 0;
+        try {
+          const [clienteRows] = await db.execute(
+            "SELECT dias_credito FROM clientes WHERE rut = ?", [rut]
+          );
+          if (clienteRows.length) diasCredito = clienteRows[0].dias_credito || 0;
+        } catch(e) {}
+
+        let fechaVenc = fecha;
+        if (diasCredito > 0 && fecha) {
+          try {
+            const partes = fecha.split("-");
+            const d = new Date(parseInt(partes[2]), parseInt(partes[1])-1, parseInt(partes[0]));
+            d.setDate(d.getDate() + diasCredito);
+            const dd = String(d.getDate()).padStart(2,"0");
+            const mm = String(d.getMonth()+1).padStart(2,"0");
+            fechaVenc = `${dd}-${mm}-${d.getFullYear()}`;
+          } catch(e) { fechaVenc = fecha; }
+        }
+
+        await db.execute(
+          `INSERT INTO cobranzas
+            (id, documento_id, nro_documento, rut, cliente, fecha_factura,
+             monto_total, dias_credito, fecha_vencimiento, estado, created_at, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+          [
+            cobId, id, nro, rut,
+            (fields?.razon_social || "").trim(),
+            fecha,
+            parseInt(monto_total_digits) || 0,
+            diasCredito,
+            fechaVenc,
+            "Pendiente",
+            now, now
+          ]
+        );
+      }
+    }
     if (!cobExist.length) {
       // Leer días de crédito del cliente
       let diasCredito = 0;
@@ -1355,6 +1422,7 @@ app.delete("/api/cobranzas/:id", authenticate, async (req, res) => {
   }
 });
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
+
 
 
 
