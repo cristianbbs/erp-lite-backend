@@ -59,6 +59,7 @@ console.log("Base de datos conectada y lista.");
 try {
   await db.execute("ALTER TABLE documentos ADD COLUMN lotes JSON");
 } catch(e) { /* ya existe */ }
+
 /* =========================
    USUARIOS Y AUTH
 ========================= */
@@ -432,10 +433,11 @@ app.get("/api/me", authenticate, (req, res) => {
 });
 
 // OBTENER TODOS LOS DOCUMENTOS
+// ✅ CORREGIDO: ahora incluye anulada y anula_documento
 app.get("/api/documentos", authenticate, async (req, res) => {
   try {
     const [rows] = await db.execute(
-     "SELECT id, created_at, source_name, rut, cliente, tipo_documento, nro_documento, fecha, monto_total_digits, lote, lotes, nro_orden_compra FROM documentos" 
+      "SELECT id, created_at, source_name, rut, cliente, tipo_documento, nro_documento, fecha, monto_total_digits, lote, lotes, nro_orden_compra, anulada, anula_documento FROM documentos"
     );
     return res.json({ ok: true, documentos: rows });
   } catch (err) {
@@ -453,12 +455,12 @@ app.get("/api/documentos/:id", authenticate, async (req, res) => {
     doc.detalle = typeof doc.detalle === "string" ? JSON.parse(doc.detalle) : doc.detalle;
     doc.lotes = typeof doc.lotes === "string" ? JSON.parse(doc.lotes || "[]") : (doc.lotes || []);
     return res.json({ ok: true, documento: doc });
-
   } catch (err) {
     console.error(err);
     return res.status(500).json({ ok: false, error: "Error obteniendo documento." });
   }
 });
+
 // ACTUALIZAR FACTURA COMPLETA (solo admin)
 app.patch("/api/documentos/:id", authenticate, async (req, res) => {
   if (req.session.rol !== "admin") return res.status(403).json({ ok: false, error: "Sin permisos." });
@@ -466,7 +468,6 @@ app.patch("/api/documentos/:id", authenticate, async (req, res) => {
     const { rut, cliente, tipo_documento, nro_documento, fecha, monto_total_digits, detalle } = req.body;
     if (!nro_documento) return res.status(400).json({ ok: false, error: "Falta número de documento." });
 
-    // Verificar duplicado solo si cambió el número
     const [current] = await db.execute("SELECT nro_documento FROM documentos WHERE id = ?", [req.params.id]);
     if (!current.length) return res.status(404).json({ ok: false, error: "No encontrado." });
 
@@ -490,6 +491,7 @@ app.patch("/api/documentos/:id", authenticate, async (req, res) => {
     return res.status(500).json({ ok: false, error: "Error actualizando documento." });
   }
 });
+
 // ACTUALIZAR LOTES DE UNA FACTURA
 app.patch("/api/documentos/:id/lotes", authenticate, async (req, res) => {
   if (req.session.rol === "readonly") return res.status(403).json({ ok: false, error: "Sin permisos." });
@@ -508,6 +510,7 @@ app.patch("/api/documentos/:id/lotes", authenticate, async (req, res) => {
     return res.status(500).json({ ok: false, error: "Error actualizando lotes." });
   }
 });
+
 // ELIMINAR UN DOCUMENTO (solo admin)
 app.delete("/api/documentos/:id", authenticate, async (req, res) => {
   if (req.session.rol !== "admin") return res.status(403).json({ ok: false, error: "Sin permisos." });
@@ -533,6 +536,7 @@ app.delete("/api/documentos", authenticate, async (req, res) => {
 });
 
 // SUBIR PDF (protegido)
+// ✅ CORREGIDO: eliminado código duplicado y variable esFactura indefinida
 app.post("/api/upload-pdf", authenticate, upload.single("pdf"), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ ok: false, error: "Falta archivo PDF" });
@@ -542,30 +546,41 @@ app.post("/api/upload-pdf", authenticate, upload.single("pdf"), async (req, res)
     const fields = extractFacturaKolderStyle(text);
     const nro = String(fields?.numero_documento || "").trim();
     if (!nro) return res.status(422).json({ ok: false, error: "No se detectó el número de documento." });
+
     // Verificar duplicado
     const [existing] = await db.execute(
       "SELECT id FROM documentos WHERE CAST(nro_documento AS UNSIGNED) = CAST(? AS UNSIGNED)",
       [nro]
     );
     if (existing.length > 0) return res.status(409).json({ ok: false, error: `La factura ${nro} ya existe.` });
+
     const id = "doc_" + Date.now().toString(36) + "_" + crypto.randomBytes(3).toString("hex");
     const now = new Date().toISOString();
+
     // Extraer lote
     const items = fields?.items || [];
     const joined = items.map(it => it?.descripcion || "").join("\n");
     const loteMatch = joined.match(/LOTE\s*:\s*([A-Za-z0-9\-_.]+)/i);
     const lote = loteMatch ? loteMatch[1].trim() : "";
+
     // Normalizar RUT
     const rut = (fields?.rut || "").replace(/\s+/g, "").trim();
+
     // Normalizar monto
     const montoRaw = fields?.total || "";
     const monto_total_digits = String(montoRaw).replace(/[^\d]/g, "").replace(/^0+/, "") || "0";
+
     // Normalizar fecha
     const fechaRaw = fields?.fecha_emision || "";
     const fechaMatch = String(fechaRaw).match(/\b(\d{2})[\/-](\d{2})[\/-](\d{4})\b/);
     const fecha = fechaMatch ? `${fechaMatch[1]}-${fechaMatch[2]}-${fechaMatch[3]}` : String(fechaRaw).trim();
-// Detectar si es nota de crédito y extraer factura que anula
-    const esNotaCredito = /nota de cr[eé]dito/i.test(fields?.tipo_documento || "");
+
+    // Detectar tipo de documento
+    const tipoDoc = (fields?.tipo_documento || "").toLowerCase();
+    const esNotaCredito = /nota de cr[eé]dito/i.test(tipoDoc);
+    const esFactura = /factura electr[oó]nica/i.test(tipoDoc);
+
+    // Si es nota de crédito, buscar factura que anula
     let anulaDocumento = null;
     if (esNotaCredito) {
       const mRef = text.match(/Fact[ura\.]*\s*Electr[óo]nica\s*N[°º]?\s*(\d+)/i)
@@ -574,6 +589,7 @@ app.post("/api/upload-pdf", authenticate, upload.single("pdf"), async (req, res)
       if (mRef) anulaDocumento = mRef[1].trim();
     }
 
+    // Guardar documento
     await db.execute(
       `INSERT INTO documentos (id, created_at, source_name, rut, cliente, tipo_documento, nro_documento, fecha, monto_total_digits, lote, detalle, preview, anula_documento, anulada)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
@@ -592,12 +608,10 @@ app.post("/api/upload-pdf", authenticate, upload.single("pdf"), async (req, res)
     // Si es nota de crédito, marcar factura original como anulada
     if (esNotaCredito && anulaDocumento) {
       try {
-        // Marcar documento como anulado
         await db.execute(
           "UPDATE documentos SET anulada = 1 WHERE nro_documento = ? AND (anulada IS NULL OR anulada = 0)",
           [anulaDocumento]
         );
-        // Actualizar cobranza a "Nota de crédito"
         await db.execute(
           "UPDATE cobranzas SET estado = 'Nota de crédito', updated_at = ? WHERE nro_documento = ?",
           [now, anulaDocumento]
@@ -605,90 +619,54 @@ app.post("/api/upload-pdf", authenticate, upload.single("pdf"), async (req, res)
       } catch(e) { console.error("Error marcando anulación:", e); }
     }
 
-if (esFactura) {
-      const cobId = "cob_" + Date.now().toString(36) + "_" + crypto.randomBytes(3).toString("hex");
-      const [cobExist] = await db.execute(
-        "SELECT id FROM cobranzas WHERE nro_documento = ?", [nro]
-      );
-      if (!cobExist.length) {
-        let diasCredito = 0;
-        try {
-          const [clienteRows] = await db.execute(
-            "SELECT dias_credito FROM clientes WHERE rut = ?", [rut]
-          );
-          if (clienteRows.length) diasCredito = clienteRows[0].dias_credito || 0;
-        } catch(e) {}
-
-        let fechaVenc = fecha;
-        if (diasCredito > 0 && fecha) {
-          try {
-            const partes = fecha.split("-");
-            const d = new Date(parseInt(partes[2]), parseInt(partes[1])-1, parseInt(partes[0]));
-            d.setDate(d.getDate() + diasCredito);
-            const dd = String(d.getDate()).padStart(2,"0");
-            const mm = String(d.getMonth()+1).padStart(2,"0");
-            fechaVenc = `${dd}-${mm}-${d.getFullYear()}`;
-          } catch(e) { fechaVenc = fecha; }
-        }
-
-        await db.execute(
-          `INSERT INTO cobranzas
-            (id, documento_id, nro_documento, rut, cliente, fecha_factura,
-             monto_total, dias_credito, fecha_vencimiento, estado, created_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
-          [
-            cobId, id, nro, rut,
-            (fields?.razon_social || "").trim(),
-            fecha,
-            parseInt(monto_total_digits) || 0,
-            diasCredito,
-            fechaVenc,
-            "Pendiente",
-            now, now
-          ]
-        );
-      }
-    }
-    if (!cobExist.length) {
-      // Leer días de crédito del cliente
-      let diasCredito = 0;
+    // Si es factura electrónica, crear cobranza automáticamente
+    if (esFactura) {
       try {
-        const [clienteRows] = await db.execute(
-          "SELECT dias_credito FROM clientes WHERE rut = ?", [rut]
+        const cobId = "cob_" + Date.now().toString(36) + "_" + crypto.randomBytes(3).toString("hex");
+        const [cobExist] = await db.execute(
+          "SELECT id FROM cobranzas WHERE nro_documento = ?", [nro]
         );
-        if (clienteRows.length) diasCredito = clienteRows[0].dias_credito || 0;
-      } catch(e) { /* si falla, queda en 0 */ }
+        if (!cobExist.length) {
+          let diasCredito = 0;
+          try {
+            const [clienteRows] = await db.execute(
+              "SELECT dias_credito FROM clientes WHERE rut = ?", [rut]
+            );
+            if (clienteRows.length) diasCredito = clienteRows[0].dias_credito || 0;
+          } catch(e) { /* si falla, queda en 0 */ }
 
-      // Calcular fecha vencimiento
-      let fechaVenc = fecha;
-      if (diasCredito > 0 && fecha) {
-        try {
-          const partes = fecha.split("-"); // DD-MM-YYYY
-          const d = new Date(parseInt(partes[2]), parseInt(partes[1])-1, parseInt(partes[0]));
-          d.setDate(d.getDate() + diasCredito);
-          const dd = String(d.getDate()).padStart(2,"0");
-          const mm = String(d.getMonth()+1).padStart(2,"0");
-          fechaVenc = `${dd}-${mm}-${d.getFullYear()}`;
-        } catch(e) { fechaVenc = fecha; }
-      }
+          let fechaVenc = fecha;
+          if (diasCredito > 0 && fecha) {
+            try {
+              const partes = fecha.split("-"); // DD-MM-YYYY
+              const d = new Date(parseInt(partes[2]), parseInt(partes[1])-1, parseInt(partes[0]));
+              d.setDate(d.getDate() + diasCredito);
+              const dd = String(d.getDate()).padStart(2,"0");
+              const mm = String(d.getMonth()+1).padStart(2,"0");
+              fechaVenc = `${dd}-${mm}-${d.getFullYear()}`;
+            } catch(e) { fechaVenc = fecha; }
+          }
 
-      await db.execute(
-        `INSERT INTO cobranzas
-          (id, documento_id, nro_documento, rut, cliente, fecha_factura,
-           monto_total, dias_credito, fecha_vencimiento, estado, created_at, updated_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
-        [
-          cobId, id, nro, rut,
-          (fields?.razon_social || "").trim(),
-          fecha,
-          parseInt(monto_total_digits) || 0,
-          diasCredito,
-          fechaVenc,
-          "Pendiente",
-          now, now
-        ]
-      );
+          await db.execute(
+            `INSERT INTO cobranzas
+              (id, documento_id, nro_documento, rut, cliente, fecha_factura,
+               monto_total, dias_credito, fecha_vencimiento, estado, created_at, updated_at)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+            [
+              cobId, id, nro, rut,
+              (fields?.razon_social || "").trim(),
+              fecha,
+              parseInt(monto_total_digits) || 0,
+              diasCredito,
+              fechaVenc,
+              "Pendiente",
+              now, now
+            ]
+          );
+        }
+      } catch(e) { console.error("Error creando cobranza automática:", e); }
     }
+
     // Auto-registrar cliente
     await upsertCliente(rut, {
       razon_social: (fields?.razon_social || "").trim(),
@@ -698,12 +676,14 @@ if (esFactura) {
       ciudad:       fields?.ciudad    || "",
       fecha
     });
+
     return res.json({ ok: true, fields, preview: text.slice(0, 2500), meta: { pages: parsed.numpages || null } });
   } catch (err) {
     console.error(err);
     return res.status(500).json({ ok: false, error: "Error procesando PDF" });
   }
 });
+
 // VERIFICAR CONTRASEÑA (para confirmar acciones críticas)
 app.post("/api/verify-password", authenticate, (req, res) => {
   const { password } = req.body || {};
@@ -715,6 +695,7 @@ app.post("/api/verify-password", authenticate, (req, res) => {
   }
   return res.json({ ok: true });
 });
+
 /* =========================
    COMPRAS
 ========================= */
@@ -803,6 +784,7 @@ app.delete("/api/compras/:id", authenticate, async (req, res) => {
     return res.status(500).json({ ok: false, error: "Error eliminando compra." });
   }
 });
+
 /* =========================
    BOLETAS
 ========================= */
@@ -877,6 +859,7 @@ app.delete("/api/boletas/:id", authenticate, async (req, res) => {
     return res.status(500).json({ ok: false, error: "Error eliminando boleta." });
   }
 });
+
 /* =========================
    ANÁLISIS DE VENTAS
 ========================= */
@@ -898,6 +881,7 @@ app.get("/api/analisis/ventas", authenticate, async (req, res) => {
     return res.status(500).json({ ok: false, error: "Error obteniendo datos." });
   }
 });
+
 /* =========================
    TRAZABILIDAD - LOTES
 ========================= */
@@ -920,13 +904,10 @@ await db.execute(`
     fecha_vencimiento VARCHAR(20),
     observaciones TEXT,
     created_at VARCHAR(64),
-    -- Proceso
     temperatura DECIMAL(5,2),
     limpieza_previa TINYINT(1) DEFAULT 0,
     incidencias TEXT,
-    -- Insumos (JSON)
     insumos JSON,
-    -- Calidad
     inspeccion_visual VARCHAR(50),
     control_temperatura VARCHAR(50),
     liberado_por VARCHAR(100),
@@ -955,7 +936,6 @@ app.get("/api/lotes/:id", authenticate, async (req, res) => {
     const lote = rows[0];
     lote.insumos = typeof lote.insumos === "string" ? JSON.parse(lote.insumos || "[]") : (lote.insumos || []);
 
-    // Buscar facturas vinculadas por código de lote
     const [facturas] = await db.execute(
       "SELECT id, nro_documento, fecha, cliente, rut, monto_total_digits, lotes FROM documentos"
     );
@@ -974,11 +954,11 @@ app.get("/api/lotes/:id", authenticate, async (req, res) => {
   }
 });
 
-// BUSCAR LOTES (para autocomplete — máximo 1 mes hacia atrás desde fecha factura)
+// BUSCAR LOTES
 app.get("/api/lotes/buscar/:q", authenticate, async (req, res) => {
   try {
     const q = `%${req.params.q}%`;
-    const fechaRef = req.query.fecha || null; // fecha de la factura DD-MM-YYYY
+    const fechaRef = req.query.fecha || null;
     
     let desde = null;
     if (fechaRef) {
@@ -1042,19 +1022,16 @@ app.post("/api/lotes", authenticate, async (req, res) => {
   }
 });
 
-// ACTUALIZAR ESTADO LOTE
+// ACTUALIZAR LOTE
 app.patch("/api/lotes/:id", authenticate, async (req, res) => {
   const { id } = req.params;
   const {
-    estado,
-    codigo,
-    producto, codigo_producto, fecha_produccion, turno,
+    estado, codigo, producto, codigo_producto, fecha_produccion, turno,
     operario, responsable_liberacion, linea, cantidad_kg,
-    fecha_vencimiento, observaciones,
-    hora_inicio, hora_fin, temperatura, limpieza_previa, incidencias,
+    fecha_vencimiento, observaciones, hora_inicio, hora_fin,
+    temperatura, limpieza_previa, incidencias,
     inspeccion_visual, control_temperatura, liberado_por,
-    insumos,
-    productos,
+    insumos, productos,
   } = req.body;
 
   try {
@@ -1070,7 +1047,6 @@ app.patch("/api/lotes/:id", authenticate, async (req, res) => {
       `UPDATE lotes SET
         estado               = COALESCE(?, estado),
         codigo               = COALESCE(?, codigo),
-        lote                 = COALESCE(?, codigo),
         producto             = COALESCE(?, producto),
         codigo_producto      = COALESCE(?, codigo_producto),
         fecha_produccion     = COALESCE(?, fecha_produccion),
@@ -1094,7 +1070,6 @@ app.patch("/api/lotes/:id", authenticate, async (req, res) => {
       WHERE id = ?`,
       [
         estado             ?? null,
-        codigo             ?? null,
         codigo             ?? null,
         producto           ?? null,
         codigo_producto    ?? null,
@@ -1138,12 +1113,13 @@ app.delete("/api/lotes/:id", authenticate, async (req, res) => {
     return res.status(500).json({ ok: false, error: "Error eliminando lote." });
   }
 });
+
 const PORT = process.env.PORT || 5050;
+
 /* =========================
    CLIENTES
 ========================= */
 
-// Upsert cliente (llamado internamente al subir factura)
 async function upsertCliente(rut, datos) {
   if (!rut) return;
   const id = "cli_" + rut.replace(/[^a-z0-9]/gi, "");
@@ -1163,7 +1139,6 @@ async function upsertCliente(rut, datos) {
        fechaDate          || null]
     );
   } else {
-    // Actualizar ultima_factura si la fecha nueva es más reciente
     await db.execute(
       `UPDATE clientes SET ultima_factura = GREATEST(COALESCE(ultima_factura, '2000-01-01'), COALESCE(?, '2000-01-01')) WHERE rut = ?`,
       [fechaDate, rut]
@@ -1174,9 +1149,7 @@ async function upsertCliente(rut, datos) {
 // GET todos los clientes
 app.get("/api/clientes", authenticate, async (req, res) => {
   try {
-    const [rows] = await db.execute(
-      "SELECT * FROM clientes ORDER BY razon_social ASC"
-    );
+    const [rows] = await db.execute("SELECT * FROM clientes ORDER BY razon_social ASC");
     return res.json({ ok: true, clientes: rows });
   } catch (err) {
     console.error(err);
@@ -1185,13 +1158,14 @@ app.get("/api/clientes", authenticate, async (req, res) => {
 });
 
 // GET cliente por RUT + historial de facturas
+// ✅ CORREGIDO: incluye anulada para que cliente-detalle pueda filtrarlas
 app.get("/api/clientes/:rut", authenticate, async (req, res) => {
   try {
     const rut = decodeURIComponent(req.params.rut);
     const [cli] = await db.execute("SELECT * FROM clientes WHERE rut = ?", [rut]);
     if (!cli.length) return res.status(404).json({ ok: false, error: "Cliente no encontrado." });
     const [facturas] = await db.execute(
-      "SELECT id, nro_documento, fecha, tipo_documento, monto_total_digits, detalle, lotes FROM documentos WHERE rut = ? ORDER BY fecha DESC",
+      "SELECT id, nro_documento, fecha, tipo_documento, monto_total_digits, detalle, lotes, anulada, anula_documento FROM documentos WHERE rut = ? ORDER BY fecha DESC",
       [rut]
     );
     return res.json({ ok: true, cliente: cli[0], facturas });
@@ -1214,13 +1188,11 @@ app.patch("/api/clientes/:rut", authenticate, async (req, res) => {
     await db.execute(
       `UPDATE clientes SET razon_social = ?, giro = ?, direccion = ?, comuna = ?, ciudad = ?,
           contacto = ?, telefono = ?, email = ?, notas = ?, primera_compra = ?,
-          dias_credito = ?,
-          updated_at = ?
+          dias_credito = ?, updated_at = ?
       WHERE rut = ?`,
       [razon_social, giro, direccion, comuna, ciudad,
        contacto, telefono, email, notas, primera_compra,
-       dias_credito ?? 0,
-       now, rut]
+       dias_credito ?? 0, now, rut]
     );
     return res.json({ ok: true });
   } catch (err) {
@@ -1228,6 +1200,7 @@ app.patch("/api/clientes/:rut", authenticate, async (req, res) => {
     return res.status(500).json({ ok: false, error: "Error actualizando cliente." });
   }
 });
+
 // ── ADJUNTOS FACTURA ──────────────────────────────────────────────────────
 app.patch("/api/documentos/:id/adjuntos", authenticate, async (req, res) => {
   if (!["admin","editor"].includes(req.session.rol))
@@ -1278,6 +1251,7 @@ app.patch("/api/lotes/:id/adjuntos", authenticate, async (req, res) => {
     return res.status(500).json({ ok: false, error: "Error guardando adjunto." });
   }
 });
+
 /* =========================
    COBRANZA
 ========================= */
@@ -1285,9 +1259,7 @@ app.patch("/api/lotes/:id/adjuntos", authenticate, async (req, res) => {
 // LISTAR COBRANZAS
 app.get("/api/cobranzas", authenticate, async (req, res) => {
   try {
-    const [rows] = await db.execute(
-      "SELECT * FROM cobranzas ORDER BY fecha_factura DESC"
-    );
+    const [rows] = await db.execute("SELECT * FROM cobranzas ORDER BY fecha_factura DESC");
     return res.json({ ok: true, cobranzas: rows });
   } catch (err) {
     console.error(err);
@@ -1320,7 +1292,6 @@ app.post("/api/cobranzas", authenticate, async (req, res) => {
     } = req.body;
     if (!nro_documento) return res.status(400).json({ ok: false, error: "Falta número de documento." });
 
-    // Verificar duplicado
     const [existing] = await db.execute(
       "SELECT id FROM cobranzas WHERE nro_documento = ?", [nro_documento]
     );
@@ -1363,7 +1334,6 @@ app.patch("/api/cobranzas/:id", authenticate, async (req, res) => {
       dias_credito, fecha_vencimiento, monto_total, cliente, rut
     } = req.body;
     const now = new Date().toISOString();
-    const nullify = v => (v === undefined ? undefined : (v === "" ? null : v));
 
     await db.execute(
       `UPDATE cobranzas SET
@@ -1421,14 +1391,5 @@ app.delete("/api/cobranzas/:id", authenticate, async (req, res) => {
     return res.status(500).json({ ok: false, error: "Error eliminando cobranza." });
   }
 });
+
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
-
-
-
-
-
-
-
-
-
-
