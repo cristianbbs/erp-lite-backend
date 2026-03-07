@@ -1143,6 +1143,7 @@ app.patch("/api/clientes/:rut", authenticate, async (req, res) => {
     const { razon_social, giro, direccion, comuna, ciudad,
             contacto, telefono, email, notas, primera_compra,
             dias_credito } = req.body;
+    const now = new Date().toISOString();
     await db.execute(
       `UPDATE clientes SET razon_social = ?, giro = ?, direccion = ?, comuna = ?, ciudad = ?,
           contacto = ?, telefono = ?, email = ?, notas = ?, primera_compra = ?,
@@ -1153,6 +1154,7 @@ app.patch("/api/clientes/:rut", authenticate, async (req, res) => {
        contacto, telefono, email, notas, primera_compra,
        dias_credito ?? 0,
        now, rut]
+    );
     return res.json({ ok: true });
   } catch (err) {
     console.error(err);
@@ -1353,6 +1355,7 @@ app.delete("/api/cobranzas/:id", authenticate, async (req, res) => {
   }
 });
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
+
 
 
 
