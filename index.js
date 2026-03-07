@@ -435,7 +435,7 @@ app.get("/api/me", authenticate, (req, res) => {
 app.get("/api/documentos", authenticate, async (req, res) => {
   try {
     const [rows] = await db.execute(
-     "SELECT id, created_at, source_name, rut, cliente, tipo_documento, nro_documento, fecha, monto_total_digits, lote, nro_orden_compra FROM documentos ORDER BY CAST(nro_documento AS UNSIGNED) DESC" 
+     "SELECT id, created_at, source_name, rut, cliente, tipo_documento, nro_documento, fecha, monto_total_digits, lote, lotes, nro_orden_compra FROM documentos" 
     );
     return res.json({ ok: true, documentos: rows });
   } catch (err) {
@@ -884,7 +884,7 @@ app.get("/api/analisis/ventas", authenticate, async (req, res) => {
   if (!["admin", "editor", "readonly"].includes(req.session.rol)) return res.status(403).json({ ok: false, error: "Sin permisos." });
   try {
     const [facturas] = await db.execute(
-      "SELECT id, nro_documento, fecha, rut, cliente, tipo_documento, monto_total_digits, detalle, lotes FROM documentos"
+      "SELECT id, nro_documento, fecha, rut, cliente, tipo_documento, monto_total_digits, detalle, lotes, anulada, anula_documento FROM documentos"
     );
     const [boletas] = await db.execute(
       "SELECT id, nro_documento, fecha, neto, iva, total, items FROM boletas"
@@ -1422,6 +1422,7 @@ app.delete("/api/cobranzas/:id", authenticate, async (req, res) => {
   }
 });
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
+
 
 
 
