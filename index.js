@@ -485,6 +485,14 @@ app.patch("/api/documentos/:id", authenticate, async (req, res) => {
       `UPDATE documentos SET rut=?, cliente=?, tipo_documento=?, nro_documento=?, fecha=?, monto_total_digits=?, detalle=? WHERE id=?`,
       [rut, cliente, tipo_documento, nro_documento, fecha, montoDigits, JSON.stringify(detalle), req.params.id]
     );
+
+    // Sincronizar cobranza asociada
+    const oldNro = current[0].nro_documento;
+    await db.execute(
+      `UPDATE cobranzas SET nro_documento=?, rut=?, cliente=?, monto_total=?, fecha_factura=?, updated_at=? WHERE documento_id=? OR nro_documento=?`,
+      [nro_documento, rut, cliente, parseInt(montoDigits)||0, fecha, new Date().toISOString(), req.params.id, oldNro]
+    );
+
     return res.json({ ok: true });
   } catch (err) {
     console.error(err);
@@ -1426,5 +1434,6 @@ app.delete("/api/cobranzas/:id", authenticate, async (req, res) => {
 });
 
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
+
 
 
