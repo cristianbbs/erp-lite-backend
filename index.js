@@ -511,11 +511,43 @@ app.patch("/api/documentos/:id/lotes", authenticate, async (req, res) => {
   }
 });
 
-// ELIMINAR UN DOCUMENTO (solo admin)
+// ELIMINAR UN DOCUMENTO (solo admin) — con sinergia cobranza + anulación
 app.delete("/api/documentos/:id", authenticate, async (req, res) => {
   if (req.session.rol !== "admin") return res.status(403).json({ ok: false, error: "Sin permisos." });
   try {
+    // Obtener datos del documento antes de borrarlo
+    const [rows] = await db.execute("SELECT nro_documento, tipo_documento, anula_documento FROM documentos WHERE id = ?", [req.params.id]);
+    if (!rows.length) return res.status(404).json({ ok: false, error: "No encontrado." });
+
+    const doc = rows[0];
+    const nro = doc.nro_documento;
+    const esNC = /nota de cr[eé]dito/i.test(doc.tipo_documento || "");
+
+    // 1) Si es Nota de Crédito, des-anular la factura original
+    if (esNC && doc.anula_documento) {
+      await db.execute(
+        "UPDATE documentos SET anulada = 0 WHERE nro_documento = ? AND anulada = 1",
+        [doc.anula_documento]
+      );
+      // Restaurar cobranza de la factura original a Pendiente
+      await db.execute(
+        "UPDATE cobranzas SET estado = 'Pendiente', updated_at = ? WHERE nro_documento = ? AND estado = 'Nota de crédito'",
+        [new Date().toISOString(), doc.anula_documento]
+      );
+    }
+
+    // 2) Si es Factura, buscar si tiene NC vinculada y borrar esa NC también
+    if (!esNC && nro) {
+      // Borrar NC que apuntan a esta factura
+      await db.execute("DELETE FROM documentos WHERE anula_documento = ?", [nro]);
+    }
+
+    // 3) Eliminar cobranza asociada al documento
+    await db.execute("DELETE FROM cobranzas WHERE nro_documento = ?", [nro]);
+
+    // 4) Eliminar el documento
     await db.execute("DELETE FROM documentos WHERE id = ?", [req.params.id]);
+
     return res.json({ ok: true });
   } catch (err) {
     console.error(err);
@@ -523,10 +555,11 @@ app.delete("/api/documentos/:id", authenticate, async (req, res) => {
   }
 });
 
-// ELIMINAR TODOS (solo admin)
+// ELIMINAR TODOS (solo admin) — también borra cobranzas asociadas
 app.delete("/api/documentos", authenticate, async (req, res) => {
   if (req.session.rol !== "admin") return res.status(403).json({ ok: false, error: "Sin permisos." });
   try {
+    await db.execute("DELETE FROM cobranzas");
     await db.execute("DELETE FROM documentos");
     return res.json({ ok: true });
   } catch (err) {
@@ -1393,3 +1426,4 @@ app.delete("/api/cobranzas/:id", authenticate, async (req, res) => {
 });
 
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
+
