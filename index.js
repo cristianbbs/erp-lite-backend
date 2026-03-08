@@ -437,7 +437,7 @@ app.get("/api/me", authenticate, (req, res) => {
 app.get("/api/documentos", authenticate, async (req, res) => {
   try {
     const [rows] = await db.execute(
-      "SELECT id, created_at, source_name, rut, cliente, tipo_documento, nro_documento, fecha, monto_total_digits, lote, lotes, nro_orden_compra, anulada, anula_documento FROM documentos"
+      "SELECT id, created_at, source_name, rut, cliente, tipo_documento, nro_documento, fecha, monto_total_digits, lote, lotes, nro_orden_compra, anulada, anula_documento FROM documentos ORDER BY CAST(nro_documento AS UNSIGNED) DESC"
     );
     return res.json({ ok: true, documentos: rows });
   } catch (err) {
@@ -1292,7 +1292,7 @@ app.patch("/api/lotes/:id/adjuntos", authenticate, async (req, res) => {
 // LISTAR COBRANZAS
 app.get("/api/cobranzas", authenticate, async (req, res) => {
   try {
-    const [rows] = await db.execute("SELECT * FROM cobranzas ORDER BY fecha_factura DESC");
+    const [rows] = await db.execute("SELECT * FROM cobranzas ORDER BY CAST(nro_documento AS UNSIGNED) DESC");
     return res.json({ ok: true, cobranzas: rows });
   } catch (err) {
     console.error(err);
@@ -1426,4 +1426,5 @@ app.delete("/api/cobranzas/:id", authenticate, async (req, res) => {
 });
 
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
+
 
