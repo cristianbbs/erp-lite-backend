@@ -1432,8 +1432,183 @@ app.delete("/api/cobranzas/:id", authenticate, async (req, res) => {
     return res.status(500).json({ ok: false, error: "Error eliminando cobranza." });
   }
 });
+/* =========================
+   COTIZACIONES
+========================= */
 
+await db.execute(`
+  CREATE TABLE IF NOT EXISTS cotizaciones (
+    id VARCHAR(64) PRIMARY KEY,
+    numero INT NOT NULL,
+    codigo VARCHAR(30) NOT NULL,
+    fecha VARCHAR(64),
+    rut_cliente VARCHAR(32),
+    razon_social VARCHAR(255),
+    direccion VARCHAR(255),
+    comuna VARCHAR(100),
+    ciudad VARCHAR(100),
+    giro VARCHAR(255),
+    email VARCHAR(255),
+    telefono VARCHAR(100),
+    contacto VARCHAR(255),
+    condicion_pago VARCHAR(100),
+    validez_dias INT DEFAULT 15,
+    lugar_despacho VARCHAR(255),
+    observaciones TEXT,
+    items JSON,
+    neto BIGINT DEFAULT 0,
+    iva BIGINT DEFAULT 0,
+    total BIGINT DEFAULT 0,
+    emitida_por VARCHAR(100),
+    estado VARCHAR(20) DEFAULT 'Vigente',
+    created_at VARCHAR(64),
+    updated_at VARCHAR(64)
+  )
+`);
+
+// LISTAR COTIZACIONES
+app.get("/api/cotizaciones", authenticate, async (req, res) => {
+  try {
+    const [rows] = await db.execute(
+      "SELECT id, numero, codigo, fecha, rut_cliente, razon_social, total, estado, emitida_por, created_at FROM cotizaciones ORDER BY numero DESC"
+    );
+    return res.json({ ok: true, cotizaciones: rows });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error obteniendo cotizaciones." });
+  }
+});
+
+// OBTENER UNA COTIZACIÓN
+app.get("/api/cotizaciones/:id", authenticate, async (req, res) => {
+  try {
+    const [rows] = await db.execute("SELECT * FROM cotizaciones WHERE id = ?", [req.params.id]);
+    if (!rows.length) return res.status(404).json({ ok: false, error: "Cotización no encontrada." });
+    const cot = rows[0];
+    cot.items = typeof cot.items === "string" ? JSON.parse(cot.items || "[]") : (cot.items || []);
+    return res.json({ ok: true, cotizacion: cot });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error obteniendo cotización." });
+  }
+});
+
+// SIGUIENTE NÚMERO CORRELATIVO
+app.get("/api/cotizaciones/siguiente/numero", authenticate, async (req, res) => {
+  try {
+    const [rows] = await db.execute("SELECT MAX(numero) as maxNum FROM cotizaciones");
+    const siguiente = Math.max((rows[0]?.maxNum || 0) + 1, 1042);
+    return res.json({ ok: true, numero: siguiente });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error obteniendo número." });
+  }
+});
+
+// CREAR COTIZACIÓN (emitir)
+app.post("/api/cotizaciones", authenticate, async (req, res) => {
+  if (req.session.rol === "readonly")
+    return res.status(403).json({ ok: false, error: "Sin permisos." });
+  try {
+    // Obtener siguiente número
+    const [rows] = await db.execute("SELECT MAX(numero) as maxNum FROM cotizaciones");
+    const numero = Math.max((rows[0]?.maxNum || 0) + 1, 1042);
+    const anio = new Date().getFullYear();
+    const codigo = `COT-KOLDER-${anio}-${String(numero).padStart(3, "0")}`;
+
+    const {
+      fecha, rut_cliente, razon_social, direccion, comuna, ciudad,
+      giro, email, telefono, contacto, condicion_pago, validez_dias,
+      lugar_despacho, observaciones, items, neto, iva, total
+    } = req.body;
+
+    if (!items || !items.length)
+      return res.status(400).json({ ok: false, error: "Agrega al menos un producto." });
+
+    const id = "cot_" + Date.now().toString(36) + "_" + crypto.randomBytes(3).toString("hex");
+    const now = new Date().toISOString();
+    const nullify = v => (v === undefined || v === "" ? null : v);
+
+    await db.execute(
+      `INSERT INTO cotizaciones
+        (id, numero, codigo, fecha, rut_cliente, razon_social, direccion, comuna, ciudad,
+         giro, email, telefono, contacto, condicion_pago, validez_dias, lugar_despacho,
+         observaciones, items, neto, iva, total, emitida_por, estado, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [
+        id, numero, codigo, nullify(fecha), nullify(rut_cliente), nullify(razon_social),
+        nullify(direccion), nullify(comuna), nullify(ciudad), nullify(giro),
+        nullify(email), nullify(telefono), nullify(contacto),
+        nullify(condicion_pago), validez_dias || 15, nullify(lugar_despacho),
+        nullify(observaciones), JSON.stringify(items), neto || 0, iva || 0, total || 0,
+        req.session.nombre, "Vigente", now, now
+      ]
+    );
+
+    return res.json({ ok: true, id, numero, codigo });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error creando cotización." });
+  }
+});
+
+// EDITAR COTIZACIÓN (solo si no está anulada)
+app.patch("/api/cotizaciones/:id", authenticate, async (req, res) => {
+  if (req.session.rol === "readonly")
+    return res.status(403).json({ ok: false, error: "Sin permisos." });
+  try {
+    const [current] = await db.execute("SELECT estado FROM cotizaciones WHERE id = ?", [req.params.id]);
+    if (!current.length) return res.status(404).json({ ok: false, error: "No encontrada." });
+    if (current[0].estado === "Anulada")
+      return res.status(400).json({ ok: false, error: "No se puede editar una cotización anulada." });
+
+    const {
+      fecha, rut_cliente, razon_social, direccion, comuna, ciudad,
+      giro, email, telefono, contacto, condicion_pago, validez_dias,
+      lugar_despacho, observaciones, items, neto, iva, total
+    } = req.body;
+
+    const now = new Date().toISOString();
+
+    await db.execute(
+      `UPDATE cotizaciones SET
+        fecha=?, rut_cliente=?, razon_social=?, direccion=?, comuna=?, ciudad=?,
+        giro=?, email=?, telefono=?, contacto=?, condicion_pago=?, validez_dias=?,
+        lugar_despacho=?, observaciones=?, items=?, neto=?, iva=?, total=?, updated_at=?
+      WHERE id=?`,
+      [
+        fecha, rut_cliente, razon_social, direccion, comuna, ciudad,
+        giro, email, telefono, contacto, condicion_pago, validez_dias || 15,
+        lugar_despacho, observaciones, JSON.stringify(items || []),
+        neto || 0, iva || 0, total || 0, now, req.params.id
+      ]
+    );
+
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error actualizando cotización." });
+  }
+});
+
+// ANULAR COTIZACIÓN (solo admin — no se borra, solo cambia estado)
+app.delete("/api/cotizaciones/:id", authenticate, async (req, res) => {
+  if (req.session.rol !== "admin")
+    return res.status(403).json({ ok: false, error: "Sin permisos." });
+  try {
+    const now = new Date().toISOString();
+    await db.execute(
+      "UPDATE cotizaciones SET estado = 'Anulada', updated_at = ? WHERE id = ?",
+      [now, req.params.id]
+    );
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error anulando cotización." });
+  }
+});
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
+
 
 
 
