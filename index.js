@@ -1607,8 +1607,120 @@ app.delete("/api/cotizaciones/:id", authenticate, async (req, res) => {
     return res.status(500).json({ ok: false, error: "Error anulando cotización." });
   }
 });
+// ENVIAR COTIZACIÓN POR EMAIL (Resend)
+app.post("/api/cotizaciones/:id/enviar-email", authenticate, async (req, res) => {
+  if (req.session.rol === "readonly")
+    return res.status(403).json({ ok: false, error: "Sin permisos." });
+
+  const RESEND_KEY = process.env.RESEND_API_KEY;
+  if (!RESEND_KEY) return res.status(500).json({ ok: false, error: "Servicio de email no configurado." });
+
+  try {
+    const { destinatario } = req.body;
+    if (!destinatario) return res.status(400).json({ ok: false, error: "Falta email destinatario." });
+
+    const [rows] = await db.execute("SELECT * FROM cotizaciones WHERE id = ?", [req.params.id]);
+    if (!rows.length) return res.status(404).json({ ok: false, error: "Cotización no encontrada." });
+    const cot = rows[0];
+    const items = typeof cot.items === "string" ? JSON.parse(cot.items || "[]") : (cot.items || []);
+
+    const fmtMoney = n => "$ " + Math.round(Number(n)||0).toLocaleString("es-CL");
+
+    const itemsHtml = items.map(it => `
+      <tr>
+        <td style="padding:10px 14px;border-bottom:1px solid #e5e7eb;font-size:13px">${it.codigo}</td>
+        <td style="padding:10px 14px;border-bottom:1px solid #e5e7eb;font-size:13px">${it.descripcion}</td>
+        <td style="padding:10px 14px;border-bottom:1px solid #e5e7eb;font-size:13px;text-align:right">${fmtMoney(it.precio)}</td>
+        <td style="padding:10px 14px;border-bottom:1px solid #e5e7eb;font-size:13px;text-align:right">${it.cantidad}</td>
+        <td style="padding:10px 14px;border-bottom:1px solid #e5e7eb;font-size:13px;text-align:right;font-weight:700">${fmtMoney(it.total)}</td>
+      </tr>
+    `).join("");
+
+    const emailHtml = `
+    <div style="font-family:Arial,Helvetica,sans-serif;max-width:640px;margin:0 auto;color:#1a1a2e">
+      <div style="background:#084999;padding:24px 28px;border-radius:12px 12px 0 0">
+        <div style="color:#fff;font-size:22px;font-weight:800">KOLDER SPA</div>
+        <div style="color:#b8d4f0;font-size:12px;margin-top:4px">Cotización de Venta</div>
+      </div>
+      <div style="background:#fff;border:1px solid #d0dce8;border-top:none;padding:28px;border-radius:0 0 12px 12px">
+        <div style="display:flex;justify-content:space-between;margin-bottom:20px">
+          <div>
+            <div style="font-size:11px;color:#5a6a7e;font-weight:700;text-transform:uppercase">N° Cotización</div>
+            <div style="font-size:20px;font-weight:800;color:#084999">${cot.codigo}</div>
+          </div>
+          <div style="text-align:right">
+            <div style="font-size:11px;color:#5a6a7e;font-weight:700;text-transform:uppercase">Fecha</div>
+            <div style="font-size:14px;font-weight:700">${cot.fecha || "—"}</div>
+          </div>
+        </div>
+
+        <div style="font-size:11px;color:#084999;font-weight:700;text-transform:uppercase;border-bottom:1px solid #d0dce8;padding-bottom:4px;margin-bottom:10px">Estimado cliente</div>
+        <p style="font-size:14px;margin-bottom:16px">
+          ${cot.contacto || cot.razon_social || "Estimado/a"},<br>
+          Le hacemos llegar la cotización solicitada con el detalle de productos y condiciones.
+        </p>
+
+        <table style="width:100%;border-collapse:collapse;margin-bottom:16px">
+          <thead>
+            <tr style="background:#084999">
+              <th style="padding:10px 14px;color:#fff;font-size:11px;font-weight:700;text-align:left">CÓDIGO</th>
+              <th style="padding:10px 14px;color:#fff;font-size:11px;font-weight:700;text-align:left">DESCRIPCIÓN</th>
+              <th style="padding:10px 14px;color:#fff;font-size:11px;font-weight:700;text-align:right">PRECIO UNIT.</th>
+              <th style="padding:10px 14px;color:#fff;font-size:11px;font-weight:700;text-align:right">CANT.</th>
+              <th style="padding:10px 14px;color:#fff;font-size:11px;font-weight:700;text-align:right">TOTAL</th>
+            </tr>
+          </thead>
+          <tbody>${itemsHtml}</tbody>
+        </table>
+
+        <div style="text-align:right;margin-bottom:20px">
+          <div style="font-size:13px;color:#5a6a7e">Neto: <strong>${fmtMoney(cot.neto)}</strong></div>
+          <div style="font-size:13px;color:#5a6a7e">IVA 19%: <strong>${fmtMoney(cot.iva)}</strong></div>
+          <div style="font-size:18px;color:#084999;font-weight:800;margin-top:6px;border-top:2px solid #084999;padding-top:8px;display:inline-block">Total: ${fmtMoney(cot.total)}</div>
+        </div>
+
+        <div style="display:flex;gap:12px;margin-bottom:16px">
+          <div style="flex:1;background:#f5f9ff;border:1px solid #d0dce8;border-radius:8px;padding:10px 14px">
+            <div style="font-size:10px;color:#5a6a7e;font-weight:700;text-transform:uppercase">Condición de pago</div>
+            <div style="font-weight:700;margin-top:2px">${cot.condicion_pago || "—"}</div>
+          </div>
+          <div style="flex:1;background:#f5f9ff;border:1px solid #d0dce8;border-radius:8px;padding:10px 14px">
+            <div style="font-size:10px;color:#5a6a7e;font-weight:700;text-transform:uppercase">Validez</div>
+            <div style="font-weight:700;margin-top:2px">${cot.validez_dias || 15} días</div>
+          </div>
+        </div>
+
+        ${cot.observaciones ? `<div style="background:#f8fbff;border:1px solid #d0dce8;border-radius:8px;padding:10px 14px;font-size:13px;margin-bottom:16px"><div style="font-size:10px;color:#5a6a7e;font-weight:700;text-transform:uppercase;margin-bottom:4px">Observaciones</div>${cot.observaciones}</div>` : ""}
+
+        <p style="font-size:13px;color:#5a6a7e;margin-top:16px">
+          Quedamos atentos a su respuesta.<br>
+          Saludos cordiales,<br>
+          <strong style="color:#1a1a2e">${cot.emitida_por || "Kolder SPA"}</strong>
+        </p>
+      </div>
+      <div style="text-align:center;padding:16px;font-size:11px;color:#5a6a7e">
+        Kolder SPA · 77.358.012-K · Villasana 1023, Quinta Normal · ventas@kolder.cl
+      </div>
+    </div>`;
+
+    const emailRes = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${RESEND_KEY}` },
+      body: JSON.stringify({
+        from: "Kolder SPA <cotizaciones@kolder.cl>",
+        to: [destinatario],
+        subject: `Cotización ${cot.codigo} — Kolder SPA`,
+        html: emailHtml,
+      }),
+    });
+
+    const emailData = await emailRes.json();
+    if (!emailRes.ok) throw new Error(emailData.message || "Error enviando email");
+
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: err.message || "Error enviando email." });
+  }
+});
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
-
-
-
-
