@@ -261,16 +261,21 @@ function deglueItemTail(line) {
   const numRe = "\\d{1,3}(?:\\.\\d{3})*|\\d+";
   const tailOkRe = new RegExp(`(?:^|\\s)(${numRe})\\s*(?:([A-Za-zÁÉÍÓÚÑñ\\.]{1,12})\\s+)?(${numRe})\\s+(${numRe})\\s*$`);
   if (tailOkRe.test(s)) return s;
-  // Caso: qty+precio_con_coma+valor pegados: ej "40378,1415.126" → "40 378,14 15.126"
-  const mComa = s.match(/^(.*?)(\d+)(\d{1,3},\d{2})(\d{1,3}(?:\.\d{3})*)\s*$/);
+  // Caso: precio con coma decimal pegado al valor: "40378,1415.126" o "40378,14 15.126"
+  const mComa = s.match(/^(.*\s)(\d{1,4})(\d{1,3}),(\d{2})\s*(\d[\d.]*)\s*$/);
   if (mComa) {
-    const base  = mComa[1].trim();
-    const qty   = mComa[2];
-    const precio = mComa[3].replace(",", ".");
-    const valor  = mComa[4];
+    const base   = mComa[1].trim();
+    const qty    = mComa[2];
+    const pInt   = mComa[3];
+    const pDec   = mComa[4];
+    const valor  = mComa[5];
+    const precio = `${pInt}.${pDec}`;
     const rebuilt = `${base ? base + " " : ""}${qty} ${precio} ${valor}`;
     if (tailOkRe.test(rebuilt)) return rebuilt;
   }
+  // Caso fallback: reemplazar coma decimal en tail numérico
+  const sNoComa = s.replace(/(\d),(\d{2})(\s)/g, "$1.$2$3").replace(/(\d),(\d{2})$/g, "$1.$2");
+  if (sNoComa !== s && tailOkRe.test(sNoComa)) return sNoComa;
   const mTwo = s.match(/(\d{1,3}(?:\.\d{3})+)(\d{1,3}(?:\.\d{3})+)\s*$/);
   if (mTwo) {
     const a = mTwo[1]; const b = mTwo[2];
@@ -1759,6 +1764,7 @@ app.post("/api/cotizaciones/:id/enviar-email", authenticate, async (req, res) =>
   }
 });
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
+
 
 
 
