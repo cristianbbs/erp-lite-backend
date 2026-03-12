@@ -328,7 +328,7 @@ function parseItems(text) {
   const unitRe = "[A-Za-zÁÉÍÓÚÑñ\\.]{1,12}";
   const tailRe = new RegExp(`(?:^|\\s)(${numRe})\\s*(?:(${unitRe})\\s+)?(${numRe})\\s+(${numRe})\\s*$`);
   const tailFindRe = new RegExp(`(${numRe})\\s*(?:(${unitRe})\\s+)?(${numRe})\\s+(${numRe})`, "g");
-  const sanitizeTail = (s) => (s || "").replace(/[$*]/g, " ").replace(/\s+/g, " ").trim();
+  const sanitizeTail = (s) => (s || "").replace(/[$*]/g, " ").replace(/,/g, ".").replace(/\s+/g, " ").trim();
   const noiseRe = /\b(LOTE|DESDE|HASTA)\s*:?\s*.*$/i;
   const stripLeadZeros = (x) => String(x || "").replace(/^0+(?=\d)/, "");
   const toIntCL = (s) => { if (s == null) return NaN; const n = String(s).replace(/\./g, ""); const v = parseInt(n, 10); return Number.isFinite(v) ? v : NaN; };
@@ -1749,5 +1749,6 @@ app.post("/api/cotizaciones/:id/enviar-email", authenticate, async (req, res) =>
   }
 });
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
+
 
 
