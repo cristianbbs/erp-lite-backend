@@ -369,7 +369,15 @@ function parseItems(text) {
     let qtyRaw = mTail[1]; let precioRaw = mTail[3]; let valorRaw = mTail[4];
     let cantidad = stripLeadZeros(qtyRaw); let precio = stripLeadZeros(precioRaw);
     let valor = String(valorRaw || "").replace(/^0+(?=\d)/, "");
-    const fixed = fixGluedQtyIntoPrice(cantidad, precioRaw, valorRaw);
+    // Validación: si qty=1 y precio > valor, el parser los invirtió → corregir
+    const qtyNum    = parseInt(String(cantidad).replace(/\./g,""), 10) || 1;
+    const precioNum = parseInt(String(precio).replace(/\./g,""), 10)   || 0;
+    const valorNum  = parseInt(String(valor).replace(/\./g,""), 10)    || 0;
+    if (qtyNum === 1 && precioNum > valorNum && valorNum > 0) {
+      precio = String(valorNum);
+      valor  = String(valorNum);
+    }
+    const fixed = fixGluedQtyIntoPrice(cantidad, precioRaw, valorRaw);;
     if (fixed) { cantidad = fixed.cantidad; precio = fixed.precio; valor = fixed.valor; }
     else {
       const pNum = toIntCL(precioRaw); const vNum = toIntCL(valorRaw);
@@ -1741,4 +1749,5 @@ app.post("/api/cotizaciones/:id/enviar-email", authenticate, async (req, res) =>
   }
 });
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
+
 
