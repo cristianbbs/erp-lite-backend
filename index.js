@@ -59,11 +59,6 @@ console.log("Base de datos conectada y lista.");
 try {
   await db.execute("ALTER TABLE documentos ADD COLUMN lotes JSON");
 } catch(e) { /* ya existe */ }
-try { await db.execute("ALTER TABLE lotes ADD COLUMN origen_agua VARCHAR(100)"); } catch(e) {}
-try { await db.execute("ALTER TABLE lotes ADD COLUMN estado_sistema_agua VARCHAR(50)"); } catch(e) {}
-try { await db.execute("ALTER TABLE lotes ADD COLUMN equipo_agua VARCHAR(100)"); } catch(e) {}
-try { await db.execute("ALTER TABLE lotes ADD COLUMN sanitizacion_utensilios TINYINT(1) DEFAULT 0"); } catch(e) {}
-try { await db.execute("ALTER TABLE lotes ADD COLUMN fecha_liberacion VARCHAR(20)"); } catch(e) {}
 
 /* =========================
    USUARIOS Y AUTH
@@ -261,19 +256,50 @@ function deglueItemTail(line) {
   const numRe = "\\d{1,3}(?:\\.\\d{3})*|\\d+";
   const tailOkRe = new RegExp(`(?:^|\\s)(${numRe})\\s*(?:([A-Za-zÁÉÍÓÚÑñ\\.]{1,12})\\s+)?(${numRe})\\s+(${numRe})\\s*$`);
   if (tailOkRe.test(s)) return s;
-  // Caso: precio con coma decimal pegado al valor: "40378,1415.126" o "40378,14 15.126"
-  const mComa = s.match(/^(.*\s)(\d{1,4})(\d{1,3}),(\d{2})\s*(\d[\d.]*)\s*$/);
-  if (mComa) {
-    const base   = mComa[1].trim();
-    const qty    = mComa[2];
-    const pInt   = mComa[3];
-    const pDec   = mComa[4];
-    const valor  = mComa[5];
-    const precio = `${pInt}.${pDec}`;
-    const rebuilt = `${base ? base + " " : ""}${qty} ${precio} ${valor}`;
+  // ── Manejo de precios con coma decimal (ej: "40 378,14 15.126" o "40378,1415.126") ──
+  const toIntCL = (v) => parseInt(String(v).replace(/\./g, ""), 10);
+  // Caso 1: números separados por espacios con coma decimal en el precio
+  // Ejemplo: "HIELO EN CUBOS 1 KG 40 378,14 15.126"
+  const mComaSep = s.match(/^(.*\s)(\d{1,6})\s+(\d{1,3}(?:\.\d{3})*|\d+),(\d{2})\s+(\d[\d.]*)\s*$/);
+  if (mComaSep) {
+    const base  = mComaSep[1].trim();
+    const qty   = mComaSep[2];
+    const pInt  = mComaSep[3];
+    const valor = mComaSep[5];
+    const rebuilt = `${base ? base + " " : ""}${qty} ${pInt} ${valor}`;
     if (tailOkRe.test(rebuilt)) return rebuilt;
   }
-  // Caso fallback: reemplazar coma decimal en tail numérico
+  // Caso 2: qty+precio pegados con coma decimal, valor separado o pegado
+  // Ejemplo: "...40378,1415.126" o "...40378,14 15.126"
+  const mComaAny = s.match(/^(.*?)(\d{2,8}),(\d{2})\s*(\d[\d.]*)\s*$/);
+  if (mComaAny) {
+    const base      = mComaAny[1].trim();
+    const qtyPrice  = mComaAny[2];
+    const valorStr  = mComaAny[4];
+    const valorNum  = toIntCL(valorStr);
+    let bestSplit = null;
+    for (let i = 1; i < qtyPrice.length; i++) {
+      const qtyStr   = qtyPrice.slice(0, i);
+      const priceInt = qtyPrice.slice(i);
+      if (qtyStr.startsWith("0") && qtyStr.length > 1) continue;
+      if (priceInt.startsWith("0") && priceInt.length > 1) continue;
+      const qtyNum   = parseInt(qtyStr, 10);
+      const priceNum = parseInt(priceInt, 10);
+      if (qtyNum <= 0 || priceNum <= 0) continue;
+      const expected = qtyNum * priceNum;
+      if (Math.abs(expected - valorNum) <= qtyNum) {
+        const diff = Math.abs(expected - valorNum);
+        if (!bestSplit || diff < bestSplit.diff) {
+          bestSplit = { qty: qtyStr, price: priceInt, diff };
+        }
+      }
+    }
+    if (bestSplit) {
+      const rebuilt = `${base ? base + " " : ""}${bestSplit.qty} ${bestSplit.price} ${valorStr}`;
+      if (tailOkRe.test(rebuilt)) return rebuilt;
+    }
+  }
+  // Caso 3: fallback genérico — reemplazar coma decimal a punto y re-evaluar
   const sNoComa = s.replace(/(\d),(\d{2})(\s)/g, "$1.$2$3").replace(/(\d),(\d{2})$/g, "$1.$2");
   if (sNoComa !== s && tailOkRe.test(sNoComa)) return sNoComa;
   const mTwo = s.match(/(\d{1,3}(?:\.\d{3})+)(\d{1,3}(?:\.\d{3})+)\s*$/);
@@ -343,7 +369,7 @@ function parseItems(text) {
   const unitRe = "[A-Za-zÁÉÍÓÚÑñ\\.]{1,12}";
   const tailRe = new RegExp(`(?:^|\\s)(${numRe})\\s*(?:(${unitRe})\\s+)?(${numRe})\\s+(${numRe})\\s*$`);
   const tailFindRe = new RegExp(`(${numRe})\\s*(?:(${unitRe})\\s+)?(${numRe})\\s+(${numRe})`, "g");
-  const sanitizeTail = (s) => (s || "").replace(/[$*]/g, " ").replace(/(\d),(\d+)/g, "$1.$2").replace(/\s+/g, " ").trim();
+  const sanitizeTail = (s) => (s || "").replace(/[$*]/g, " ").replace(/\s+/g, " ").trim();
   const noiseRe = /\b(LOTE|DESDE|HASTA)\s*:?\s*.*$/i;
   const stripLeadZeros = (x) => String(x || "").replace(/^0+(?=\d)/, "");
   const toIntCL = (s) => { if (s == null) return NaN; const n = String(s).replace(/\./g, ""); const v = parseInt(n, 10); return Number.isFinite(v) ? v : NaN; };
@@ -384,15 +410,7 @@ function parseItems(text) {
     let qtyRaw = mTail[1]; let precioRaw = mTail[3]; let valorRaw = mTail[4];
     let cantidad = stripLeadZeros(qtyRaw); let precio = stripLeadZeros(precioRaw);
     let valor = String(valorRaw || "").replace(/^0+(?=\d)/, "");
-    // Validación: si qty=1 y precio > valor, el parser los invirtió → corregir
-    const qtyNum    = parseInt(String(cantidad).replace(/\./g,""), 10) || 1;
-    const precioNum = parseInt(String(precio).replace(/\./g,""), 10)   || 0;
-    const valorNum  = parseInt(String(valor).replace(/\./g,""), 10)    || 0;
-    if (qtyNum === 1 && precioNum > valorNum && valorNum > 0) {
-      precio = String(valorNum);
-      valor  = String(valorNum);
-    }
-    const fixed = fixGluedQtyIntoPrice(cantidad, precioRaw, valorRaw);;
+    const fixed = fixGluedQtyIntoPrice(cantidad, precioRaw, valorRaw);
     if (fixed) { cantidad = fixed.cantidad; precio = fixed.precio; valor = fixed.valor; }
     else {
       const pNum = toIntCL(precioRaw); const vNum = toIntCL(valorRaw);
@@ -1062,7 +1080,7 @@ app.post("/api/lotes", authenticate, async (req, res) => {
       codigo, producto, codigo_producto, fecha_produccion, hora_inicio, hora_fin,
       turno, operario, responsable_liberacion, linea, cantidad_kg, estado,
       fecha_vencimiento, observaciones, temperatura, limpieza_previa, incidencias,
-      insumos, productos, inspeccion_visual, control_temperatura, liberado_por, fecha_liberacion, origen_agua, estado_sistema_agua, equipo_agua, sanitizacion_utensilios
+      insumos, productos, inspeccion_visual, control_temperatura, liberado_por, fecha_liberacion
     } = req.body;
     if (!codigo) return res.status(400).json({ ok: false, error: "Falta código de lote." });
     const [existing] = await db.execute("SELECT id FROM lotes WHERE codigo = ?", [codigo]);
@@ -1074,18 +1092,15 @@ app.post("/api/lotes", authenticate, async (req, res) => {
       `INSERT INTO lotes (id, codigo, producto, codigo_producto, fecha_produccion, hora_inicio, hora_fin,
         turno, operario, responsable_liberacion, linea, cantidad_kg, estado, fecha_vencimiento,
         observaciones, created_at, temperatura, limpieza_previa, incidencias, insumos, productos,
-        inspeccion_visual, control_temperatura, liberado_por, fecha_liberacion,
-        origen_agua, estado_sistema_agua, equipo_agua, sanitizacion_utensilios)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        inspeccion_visual, control_temperatura, liberado_por, fecha_liberacion)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [id, codigo, nullify(producto), nullify(codigo_producto), nullify(fecha_produccion), nullify(hora_inicio), nullify(hora_fin),
        nullify(turno), nullify(operario), nullify(responsable_liberacion), nullify(linea), cantidad_kg || 0, estado || "Liberado",
        nullify(fecha_vencimiento), nullify(observaciones), new Date().toISOString(),
        temperatura != null ? temperatura : null, limpieza_previa ? 1 : 0, nullify(incidencias),
        JSON.stringify(insumos || []),
        JSON.stringify(productos || []),
-       nullify(inspeccion_visual), nullify(control_temperatura), nullify(liberado_por), nullify(fecha_liberacion),
-       nullify(origen_agua), nullify(estado_sistema_agua), nullify(equipo_agua),
-       sanitizacion_utensilios ? 1 : 0]
+       nullify(inspeccion_visual), nullify(control_temperatura), nullify(liberado_por), nullify(fecha_liberacion)]
     );
     return res.json({ ok: true, id });
   } catch (err) {
@@ -1104,7 +1119,6 @@ app.patch("/api/lotes/:id", authenticate, async (req, res) => {
     temperatura, limpieza_previa, incidencias,
     inspeccion_visual, control_temperatura, liberado_por,
     insumos, productos,
-    origen_agua, estado_sistema_agua, equipo_agua, sanitizacion_utensilios,
   } = req.body;
 
   try {
@@ -1139,11 +1153,7 @@ app.patch("/api/lotes/:id", authenticate, async (req, res) => {
         control_temperatura  = COALESCE(?, control_temperatura),
         liberado_por         = COALESCE(?, liberado_por),
         insumos              = COALESCE(?, insumos),
-        productos            = COALESCE(?, productos),
-        origen_agua          = COALESCE(?, origen_agua),
-        estado_sistema_agua  = COALESCE(?, estado_sistema_agua),
-        equipo_agua          = COALESCE(?, equipo_agua),
-        sanitizacion_utensilios = COALESCE(?, sanitizacion_utensilios)
+        productos            = COALESCE(?, productos)
       WHERE id = ?`,
       [
         estado             ?? null,
@@ -1168,10 +1178,6 @@ app.patch("/api/lotes/:id", authenticate, async (req, res) => {
         liberado_por       ?? null,
         insumosJson,
         productosJson,
-        origen_agua          ?? null,
-        estado_sistema_agua  ?? null,
-        equipo_agua          ?? null,
-        sanitizacion_utensilios !== undefined ? (sanitizacion_utensilios ? 1 : 0) : null,
         id,
       ]
     );
@@ -1764,10 +1770,4 @@ app.post("/api/cotizaciones/:id/enviar-email", authenticate, async (req, res) =>
   }
 });
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
-
-
-
-
-
-
 
