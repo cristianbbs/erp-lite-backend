@@ -59,6 +59,11 @@ console.log("Base de datos conectada y lista.");
 try {
   await db.execute("ALTER TABLE documentos ADD COLUMN lotes JSON");
 } catch(e) { /* ya existe */ }
+try { await db.execute("ALTER TABLE lotes ADD COLUMN origen_agua VARCHAR(100)"); } catch(e) {}
+try { await db.execute("ALTER TABLE lotes ADD COLUMN estado_sistema_agua VARCHAR(50)"); } catch(e) {}
+try { await db.execute("ALTER TABLE lotes ADD COLUMN equipo_agua VARCHAR(100)"); } catch(e) {}
+try { await db.execute("ALTER TABLE lotes ADD COLUMN sanitizacion_utensilios TINYINT(1) DEFAULT 0"); } catch(e) {}
+try { await db.execute("ALTER TABLE lotes ADD COLUMN fecha_liberacion VARCHAR(20)"); } catch(e) {}
 
 /* =========================
    USUARIOS Y AUTH
@@ -1034,7 +1039,7 @@ app.post("/api/lotes", authenticate, async (req, res) => {
       codigo, producto, codigo_producto, fecha_produccion, hora_inicio, hora_fin,
       turno, operario, responsable_liberacion, linea, cantidad_kg, estado,
       fecha_vencimiento, observaciones, temperatura, limpieza_previa, incidencias,
-      insumos, productos, inspeccion_visual, control_temperatura, liberado_por, fecha_liberacion
+      insumos, productos, inspeccion_visual, control_temperatura, liberado_por, fecha_liberacion, origen_agua, estado_sistema_agua, equipo_agua, sanitizacion_utensilios
     } = req.body;
     if (!codigo) return res.status(400).json({ ok: false, error: "Falta código de lote." });
     const [existing] = await db.execute("SELECT id FROM lotes WHERE codigo = ?", [codigo]);
@@ -1046,15 +1051,18 @@ app.post("/api/lotes", authenticate, async (req, res) => {
       `INSERT INTO lotes (id, codigo, producto, codigo_producto, fecha_produccion, hora_inicio, hora_fin,
         turno, operario, responsable_liberacion, linea, cantidad_kg, estado, fecha_vencimiento,
         observaciones, created_at, temperatura, limpieza_previa, incidencias, insumos, productos,
-        inspeccion_visual, control_temperatura, liberado_por, fecha_liberacion)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        inspeccion_visual, control_temperatura, liberado_por, fecha_liberacion,
+        origen_agua, estado_sistema_agua, equipo_agua, sanitizacion_utensilios)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [id, codigo, nullify(producto), nullify(codigo_producto), nullify(fecha_produccion), nullify(hora_inicio), nullify(hora_fin),
        nullify(turno), nullify(operario), nullify(responsable_liberacion), nullify(linea), cantidad_kg || 0, estado || "Liberado",
        nullify(fecha_vencimiento), nullify(observaciones), new Date().toISOString(),
        temperatura != null ? temperatura : null, limpieza_previa ? 1 : 0, nullify(incidencias),
        JSON.stringify(insumos || []),
        JSON.stringify(productos || []),
-       nullify(inspeccion_visual), nullify(control_temperatura), nullify(liberado_por), nullify(fecha_liberacion)]
+       nullify(inspeccion_visual), nullify(control_temperatura), nullify(liberado_por), nullify(fecha_liberacion),
+       nullify(origen_agua), nullify(estado_sistema_agua), nullify(equipo_agua),
+       sanitizacion_utensilios ? 1 : 0]
     );
     return res.json({ ok: true, id });
   } catch (err) {
@@ -1073,6 +1081,7 @@ app.patch("/api/lotes/:id", authenticate, async (req, res) => {
     temperatura, limpieza_previa, incidencias,
     inspeccion_visual, control_temperatura, liberado_por,
     insumos, productos,
+    origen_agua, estado_sistema_agua, equipo_agua, sanitizacion_utensilios,
   } = req.body;
 
   try {
@@ -1107,7 +1116,11 @@ app.patch("/api/lotes/:id", authenticate, async (req, res) => {
         control_temperatura  = COALESCE(?, control_temperatura),
         liberado_por         = COALESCE(?, liberado_por),
         insumos              = COALESCE(?, insumos),
-        productos            = COALESCE(?, productos)
+        productos            = COALESCE(?, productos),
+        origen_agua          = COALESCE(?, origen_agua),
+        estado_sistema_agua  = COALESCE(?, estado_sistema_agua),
+        equipo_agua          = COALESCE(?, equipo_agua),
+        sanitizacion_utensilios = COALESCE(?, sanitizacion_utensilios)
       WHERE id = ?`,
       [
         estado             ?? null,
@@ -1132,6 +1145,10 @@ app.patch("/api/lotes/:id", authenticate, async (req, res) => {
         liberado_por       ?? null,
         insumosJson,
         productosJson,
+        origen_agua          ?? null,
+        estado_sistema_agua  ?? null,
+        equipo_agua          ?? null,
+        sanitizacion_utensilios !== undefined ? (sanitizacion_utensilios ? 1 : 0) : null,
         id,
       ]
     );
@@ -1724,3 +1741,4 @@ app.post("/api/cotizaciones/:id/enviar-email", authenticate, async (req, res) =>
   }
 });
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
+
