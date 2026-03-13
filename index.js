@@ -1771,3 +1771,682 @@ app.post("/api/cotizaciones/:id/enviar-email", authenticate, async (req, res) =>
 });
 app.listen(PORT, "0.0.0.0", () => console.log(`Server running on port ${PORT}`));
 
+/* =========================
+   GASTOS - CONFIGURACIÓN GLOBAL
+========================= */
+
+await db.execute(`
+  CREATE TABLE IF NOT EXISTS config_gastos (
+    clave VARCHAR(100) PRIMARY KEY,
+    valor TEXT,
+    updated_at VARCHAR(64)
+  )
+`);
+
+// Insertar valores por defecto si no existen
+const CONFIG_DEFAULTS = {
+  // Descuentos trabajador
+  "afp_tasa_default": "11.44",
+  "salud_tasa": "7",
+  "cesantia_trabajador_indefinido": "0.6",
+  "cesantia_trabajador_plazo_fijo": "0",
+  // Aportes empleador
+  "cesantia_empleador_indefinido": "2.4",
+  "cesantia_empleador_plazo_fijo": "3",
+  "sis_tasa": "1.88",
+  "mutual_tasa": "0.93",
+  "aporte_patronal_reforma": "1",
+  // Boletas honorarios
+  "retencion_honorarios": "13.75",
+  // Tope imponible
+  "tope_imponible_uf": "90",
+  "valor_uf": "38500",
+  // Gratificación
+  "gratificacion_legal_tope": "4.75",
+  // Listas
+  "lista_afp": JSON.stringify([
+    { nombre: "Capital", tasa: "11.44" },
+    { nombre: "Cuprum", tasa: "11.44" },
+    { nombre: "Habitat", tasa: "11.27" },
+    { nombre: "Modelo", tasa: "10.58" },
+    { nombre: "PlanVital", tasa: "11.16" },
+    { nombre: "ProVida", tasa: "11.45" },
+    { nombre: "Uno", tasa: "10.69" }
+  ]),
+  "lista_salud": JSON.stringify([
+    { nombre: "Fonasa", tipo: "fonasa", tasa: "7" },
+    { nombre: "Banmédica", tipo: "isapre", tasa: "7" },
+    { nombre: "Colmena", tipo: "isapre", tasa: "7" },
+    { nombre: "Cruz Blanca", tipo: "isapre", tasa: "7" },
+    { nombre: "Nueva Masvida", tipo: "isapre", tasa: "7" },
+    { nombre: "Vida Tres", tipo: "isapre", tasa: "7" },
+    { nombre: "Esencial", tipo: "isapre", tasa: "7" }
+  ])
+};
+
+for (const [clave, valor] of Object.entries(CONFIG_DEFAULTS)) {
+  try {
+    await db.execute(
+      "INSERT IGNORE INTO config_gastos (clave, valor, updated_at) VALUES (?, ?, ?)",
+      [clave, valor, new Date().toISOString()]
+    );
+  } catch(e) {}
+}
+
+// GET configuración
+app.get("/api/config-gastos", authenticate, async (req, res) => {
+  try {
+    const [rows] = await db.execute("SELECT clave, valor FROM config_gastos");
+    const config = {};
+    rows.forEach(r => { config[r.clave] = r.valor; });
+    return res.json({ ok: true, config });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error obteniendo configuración." });
+  }
+});
+
+// PATCH configuración (solo admin)
+app.patch("/api/config-gastos", authenticate, async (req, res) => {
+  if (req.session.rol !== "admin") return res.status(403).json({ ok: false, error: "Sin permisos." });
+  try {
+    const { cambios } = req.body;
+    if (!cambios || typeof cambios !== "object") return res.status(400).json({ ok: false, error: "Formato inválido." });
+    const now = new Date().toISOString();
+    for (const [clave, valor] of Object.entries(cambios)) {
+      await db.execute(
+        "INSERT INTO config_gastos (clave, valor, updated_at) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE valor = VALUES(valor), updated_at = VALUES(updated_at)",
+        [clave, typeof valor === "object" ? JSON.stringify(valor) : String(valor), now]
+      );
+    }
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error guardando configuración." });
+  }
+});
+
+/* =========================
+   GASTOS - TRABAJADORES
+========================= */
+
+await db.execute(`
+  CREATE TABLE IF NOT EXISTS trabajadores (
+    id VARCHAR(64) PRIMARY KEY,
+    rut VARCHAR(32) UNIQUE NOT NULL,
+    nombre VARCHAR(255),
+    direccion VARCHAR(255),
+    comuna VARCHAR(100),
+    ciudad VARCHAR(100),
+    telefono VARCHAR(50),
+    email VARCHAR(150),
+    fecha_nacimiento VARCHAR(20),
+    estado_civil VARCHAR(30),
+    cargo VARCHAR(100),
+    fecha_inicio VARCHAR(20),
+    fecha_termino VARCHAR(20),
+    tipo_contrato VARCHAR(30) DEFAULT 'indefinido',
+    estado VARCHAR(20) DEFAULT 'activo',
+    sueldo_base BIGINT DEFAULT 0,
+    gratificacion BIGINT DEFAULT 0,
+    colacion BIGINT DEFAULT 0,
+    movilizacion BIGINT DEFAULT 0,
+    bono_adicional BIGINT DEFAULT 0,
+    afp_nombre VARCHAR(50),
+    afp_tasa DECIMAL(5,2),
+    salud_nombre VARCHAR(50),
+    salud_tipo VARCHAR(20) DEFAULT 'fonasa',
+    salud_tasa DECIMAL(5,2) DEFAULT 7,
+    salud_adicional BIGINT DEFAULT 0,
+    salud_uf_pactadas DECIMAL(6,2) DEFAULT 0,
+    seguro_cesantia_tasa DECIMAL(5,2),
+    adj_contrato TEXT,
+    adj_contrato_nombre VARCHAR(255),
+    anexos JSON,
+    notas TEXT,
+    created_at VARCHAR(64),
+    updated_at VARCHAR(64)
+  )
+`);
+
+// LISTAR TRABAJADORES
+app.get("/api/trabajadores", authenticate, async (req, res) => {
+  try {
+    const [rows] = await db.execute(
+      "SELECT id, rut, nombre, cargo, estado, sueldo_base, tipo_contrato, fecha_inicio FROM trabajadores ORDER BY nombre ASC"
+    );
+    return res.json({ ok: true, trabajadores: rows });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error obteniendo trabajadores." });
+  }
+});
+
+// OBTENER TRABAJADOR POR ID
+app.get("/api/trabajadores/:id", authenticate, async (req, res) => {
+  try {
+    const [rows] = await db.execute("SELECT * FROM trabajadores WHERE id = ?", [req.params.id]);
+    if (!rows.length) return res.status(404).json({ ok: false, error: "No encontrado." });
+    const t = rows[0];
+    t.anexos = typeof t.anexos === "string" ? JSON.parse(t.anexos || "[]") : (t.anexos || []);
+    return res.json({ ok: true, trabajador: t });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error obteniendo trabajador." });
+  }
+});
+
+// CREAR TRABAJADOR
+app.post("/api/trabajadores", authenticate, async (req, res) => {
+  if (!["admin","editor"].includes(req.session.rol)) return res.status(403).json({ ok: false, error: "Sin permisos." });
+  try {
+    const b = req.body;
+    if (!b.rut || !b.nombre) return res.status(400).json({ ok: false, error: "Falta RUT o nombre." });
+    const [existing] = await db.execute("SELECT id FROM trabajadores WHERE rut = ?", [b.rut]);
+    if (existing.length > 0) return res.status(409).json({ ok: false, error: `El trabajador con RUT ${b.rut} ya existe.` });
+
+    const id = "trb_" + Date.now().toString(36) + "_" + crypto.randomBytes(3).toString("hex");
+    const now = new Date().toISOString();
+    const n = v => (v === undefined || v === "" ? null : v);
+
+    await db.execute(
+      `INSERT INTO trabajadores (id, rut, nombre, direccion, comuna, ciudad, telefono, email,
+        fecha_nacimiento, estado_civil, cargo, fecha_inicio, fecha_termino, tipo_contrato, estado,
+        sueldo_base, gratificacion, colacion, movilizacion, bono_adicional,
+        afp_nombre, afp_tasa, salud_nombre, salud_tipo, salud_tasa, salud_adicional, salud_uf_pactadas,
+        seguro_cesantia_tasa, notas, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [id, b.rut, b.nombre, n(b.direccion), n(b.comuna), n(b.ciudad), n(b.telefono), n(b.email),
+       n(b.fecha_nacimiento), n(b.estado_civil), n(b.cargo), n(b.fecha_inicio), n(b.fecha_termino),
+       b.tipo_contrato || "indefinido", b.estado || "activo",
+       b.sueldo_base || 0, b.gratificacion || 0, b.colacion || 0, b.movilizacion || 0, b.bono_adicional || 0,
+       n(b.afp_nombre), b.afp_tasa || null, n(b.salud_nombre), b.salud_tipo || "fonasa",
+       b.salud_tasa || 7, b.salud_adicional || 0, b.salud_uf_pactadas || 0,
+       b.seguro_cesantia_tasa || null, n(b.notas), now, now]
+    );
+    return res.json({ ok: true, id });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error creando trabajador." });
+  }
+});
+
+// ACTUALIZAR TRABAJADOR
+app.patch("/api/trabajadores/:id", authenticate, async (req, res) => {
+  if (!["admin","editor"].includes(req.session.rol)) return res.status(403).json({ ok: false, error: "Sin permisos." });
+  try {
+    const b = req.body;
+    const now = new Date().toISOString();
+    await db.execute(
+      `UPDATE trabajadores SET
+        nombre=COALESCE(?,nombre), rut=COALESCE(?,rut), direccion=COALESCE(?,direccion),
+        comuna=COALESCE(?,comuna), ciudad=COALESCE(?,ciudad), telefono=COALESCE(?,telefono),
+        email=COALESCE(?,email), fecha_nacimiento=COALESCE(?,fecha_nacimiento),
+        estado_civil=COALESCE(?,estado_civil), cargo=COALESCE(?,cargo),
+        fecha_inicio=COALESCE(?,fecha_inicio), fecha_termino=COALESCE(?,fecha_termino),
+        tipo_contrato=COALESCE(?,tipo_contrato), estado=COALESCE(?,estado),
+        sueldo_base=COALESCE(?,sueldo_base), gratificacion=COALESCE(?,gratificacion),
+        colacion=COALESCE(?,colacion), movilizacion=COALESCE(?,movilizacion),
+        bono_adicional=COALESCE(?,bono_adicional),
+        afp_nombre=COALESCE(?,afp_nombre), afp_tasa=COALESCE(?,afp_tasa),
+        salud_nombre=COALESCE(?,salud_nombre), salud_tipo=COALESCE(?,salud_tipo),
+        salud_tasa=COALESCE(?,salud_tasa), salud_adicional=COALESCE(?,salud_adicional),
+        salud_uf_pactadas=COALESCE(?,salud_uf_pactadas),
+        seguro_cesantia_tasa=COALESCE(?,seguro_cesantia_tasa),
+        notas=COALESCE(?,notas), updated_at=?
+      WHERE id=?`,
+      [b.nombre??null, b.rut??null, b.direccion??null, b.comuna??null, b.ciudad??null,
+       b.telefono??null, b.email??null, b.fecha_nacimiento??null, b.estado_civil??null,
+       b.cargo??null, b.fecha_inicio??null, b.fecha_termino??null, b.tipo_contrato??null,
+       b.estado??null, b.sueldo_base??null, b.gratificacion??null, b.colacion??null,
+       b.movilizacion??null, b.bono_adicional??null, b.afp_nombre??null, b.afp_tasa??null,
+       b.salud_nombre??null, b.salud_tipo??null, b.salud_tasa??null, b.salud_adicional??null,
+       b.salud_uf_pactadas??null, b.seguro_cesantia_tasa??null, b.notas??null, now, req.params.id]
+    );
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error actualizando trabajador." });
+  }
+});
+
+// ADJUNTOS TRABAJADOR (contrato, anexos)
+app.patch("/api/trabajadores/:id/adjuntos", authenticate, async (req, res) => {
+  if (!["admin","editor"].includes(req.session.rol)) return res.status(403).json({ ok: false, error: "Sin permisos." });
+  try {
+    const { campo, valor, nombre } = req.body;
+    const permitidos = ["adj_contrato", "adj_contrato_nombre", "anexos"];
+    if (!permitidos.includes(campo)) return res.status(400).json({ ok: false, error: "Campo no permitido." });
+
+    if (campo === "anexos") {
+      await db.execute("UPDATE trabajadores SET anexos = ?, updated_at = ? WHERE id = ?",
+        [JSON.stringify(valor || []), new Date().toISOString(), req.params.id]);
+    } else {
+      const updates = [[campo, valor ?? null]];
+      if (campo === "adj_contrato") updates.push(["adj_contrato_nombre", valor ? (nombre ?? null) : null]);
+      for (const [col, val] of updates) {
+        await db.execute(`UPDATE trabajadores SET \`${col}\` = ?, updated_at = ? WHERE id = ?`,
+          [val, new Date().toISOString(), req.params.id]);
+      }
+    }
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error guardando adjunto." });
+  }
+});
+
+// ELIMINAR TRABAJADOR (solo admin)
+app.delete("/api/trabajadores/:id", authenticate, async (req, res) => {
+  if (req.session.rol !== "admin") return res.status(403).json({ ok: false, error: "Sin permisos." });
+  try {
+    await db.execute("DELETE FROM trabajadores WHERE id = ?", [req.params.id]);
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error eliminando trabajador." });
+  }
+});
+
+/* =========================
+   GASTOS - LIQUIDACIONES
+========================= */
+
+await db.execute(`
+  CREATE TABLE IF NOT EXISTS liquidaciones (
+    id VARCHAR(64) PRIMARY KEY,
+    trabajador_id VARCHAR(64) NOT NULL,
+    periodo VARCHAR(10) NOT NULL,
+    anio INT,
+    mes INT,
+    dias_trabajados INT DEFAULT 30,
+    sueldo_base BIGINT DEFAULT 0,
+    gratificacion BIGINT DEFAULT 0,
+    horas_extra_50 INT DEFAULT 0,
+    monto_he_50 BIGINT DEFAULT 0,
+    horas_extra_100 INT DEFAULT 0,
+    monto_he_100 BIGINT DEFAULT 0,
+    bono_adicional BIGINT DEFAULT 0,
+    colacion BIGINT DEFAULT 0,
+    movilizacion BIGINT DEFAULT 0,
+    total_haberes_imponibles BIGINT DEFAULT 0,
+    total_haberes_no_imponibles BIGINT DEFAULT 0,
+    descuento_afp BIGINT DEFAULT 0,
+    descuento_salud BIGINT DEFAULT 0,
+    descuento_salud_adicional BIGINT DEFAULT 0,
+    descuento_cesantia BIGINT DEFAULT 0,
+    descuento_impuesto BIGINT DEFAULT 0,
+    otros_descuentos BIGINT DEFAULT 0,
+    total_descuentos BIGINT DEFAULT 0,
+    sueldo_liquido BIGINT DEFAULT 0,
+    costo_empleador_cesantia BIGINT DEFAULT 0,
+    costo_empleador_sis BIGINT DEFAULT 0,
+    costo_empleador_mutual BIGINT DEFAULT 0,
+    costo_empleador_reforma BIGINT DEFAULT 0,
+    costo_empresa_total BIGINT DEFAULT 0,
+    adj_liquidacion TEXT,
+    adj_liquidacion_nombre VARCHAR(255),
+    notas TEXT,
+    created_at VARCHAR(64),
+    FOREIGN KEY (trabajador_id) REFERENCES trabajadores(id) ON DELETE CASCADE
+  )
+`);
+
+// LISTAR LIQUIDACIONES DE UN TRABAJADOR
+app.get("/api/trabajadores/:id/liquidaciones", authenticate, async (req, res) => {
+  try {
+    const [rows] = await db.execute(
+      "SELECT * FROM liquidaciones WHERE trabajador_id = ? ORDER BY anio DESC, mes DESC",
+      [req.params.id]
+    );
+    return res.json({ ok: true, liquidaciones: rows });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error obteniendo liquidaciones." });
+  }
+});
+
+// CREAR LIQUIDACIÓN
+app.post("/api/liquidaciones", authenticate, async (req, res) => {
+  if (!["admin","editor"].includes(req.session.rol)) return res.status(403).json({ ok: false, error: "Sin permisos." });
+  try {
+    const b = req.body;
+    if (!b.trabajador_id || !b.periodo) return res.status(400).json({ ok: false, error: "Falta trabajador o período." });
+
+    // Verificar duplicado
+    const [dup] = await db.execute(
+      "SELECT id FROM liquidaciones WHERE trabajador_id = ? AND periodo = ?",
+      [b.trabajador_id, b.periodo]
+    );
+    if (dup.length > 0) return res.status(409).json({ ok: false, error: `Ya existe liquidación para ${b.periodo}.` });
+
+    const id = "liq_" + Date.now().toString(36) + "_" + crypto.randomBytes(3).toString("hex");
+    const periodoMatch = b.periodo.match(/^(\d{4})-(\d{2})$/);
+    const anio = periodoMatch ? parseInt(periodoMatch[1]) : null;
+    const mes = periodoMatch ? parseInt(periodoMatch[2]) : null;
+
+    await db.execute(
+      `INSERT INTO liquidaciones (id, trabajador_id, periodo, anio, mes, dias_trabajados,
+        sueldo_base, gratificacion, horas_extra_50, monto_he_50, horas_extra_100, monto_he_100,
+        bono_adicional, colacion, movilizacion,
+        total_haberes_imponibles, total_haberes_no_imponibles,
+        descuento_afp, descuento_salud, descuento_salud_adicional, descuento_cesantia,
+        descuento_impuesto, otros_descuentos, total_descuentos, sueldo_liquido,
+        costo_empleador_cesantia, costo_empleador_sis, costo_empleador_mutual, costo_empleador_reforma,
+        costo_empresa_total, notas, created_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [id, b.trabajador_id, b.periodo, anio, mes, b.dias_trabajados || 30,
+       b.sueldo_base||0, b.gratificacion||0, b.horas_extra_50||0, b.monto_he_50||0,
+       b.horas_extra_100||0, b.monto_he_100||0, b.bono_adicional||0, b.colacion||0, b.movilizacion||0,
+       b.total_haberes_imponibles||0, b.total_haberes_no_imponibles||0,
+       b.descuento_afp||0, b.descuento_salud||0, b.descuento_salud_adicional||0,
+       b.descuento_cesantia||0, b.descuento_impuesto||0, b.otros_descuentos||0,
+       b.total_descuentos||0, b.sueldo_liquido||0,
+       b.costo_empleador_cesantia||0, b.costo_empleador_sis||0, b.costo_empleador_mutual||0,
+       b.costo_empleador_reforma||0, b.costo_empresa_total||0, b.notas||null, new Date().toISOString()]
+    );
+    return res.json({ ok: true, id });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error creando liquidación." });
+  }
+});
+
+// ELIMINAR LIQUIDACIÓN
+app.delete("/api/liquidaciones/:id", authenticate, async (req, res) => {
+  if (req.session.rol !== "admin") return res.status(403).json({ ok: false, error: "Sin permisos." });
+  try {
+    await db.execute("DELETE FROM liquidaciones WHERE id = ?", [req.params.id]);
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error eliminando liquidación." });
+  }
+});
+
+// ADJUNTO LIQUIDACIÓN
+app.patch("/api/liquidaciones/:id/adjuntos", authenticate, async (req, res) => {
+  if (!["admin","editor"].includes(req.session.rol)) return res.status(403).json({ ok: false, error: "Sin permisos." });
+  try {
+    const { valor, nombre } = req.body;
+    await db.execute(
+      "UPDATE liquidaciones SET adj_liquidacion = ?, adj_liquidacion_nombre = ? WHERE id = ?",
+      [valor ?? null, valor ? (nombre ?? null) : null, req.params.id]
+    );
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error guardando adjunto." });
+  }
+});
+
+/* =========================
+   GASTOS - PROVEEDORES DE SERVICIOS
+========================= */
+
+await db.execute(`
+  CREATE TABLE IF NOT EXISTS proveedores_servicios (
+    id VARCHAR(64) PRIMARY KEY,
+    rut VARCHAR(32),
+    nombre VARCHAR(255) NOT NULL,
+    tipo VARCHAR(50) DEFAULT 'persona',
+    servicio VARCHAR(255),
+    telefono VARCHAR(50),
+    email VARCHAR(150),
+    notas TEXT,
+    created_at VARCHAR(64)
+  )
+`);
+
+// LISTAR PROVEEDORES
+app.get("/api/proveedores-servicios", authenticate, async (req, res) => {
+  try {
+    const [rows] = await db.execute("SELECT * FROM proveedores_servicios ORDER BY nombre ASC");
+    return res.json({ ok: true, proveedores: rows });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error obteniendo proveedores." });
+  }
+});
+
+// CREAR PROVEEDOR
+app.post("/api/proveedores-servicios", authenticate, async (req, res) => {
+  if (!["admin","editor"].includes(req.session.rol)) return res.status(403).json({ ok: false, error: "Sin permisos." });
+  try {
+    const b = req.body;
+    if (!b.nombre) return res.status(400).json({ ok: false, error: "Falta nombre." });
+    const id = "prov_" + Date.now().toString(36) + "_" + crypto.randomBytes(3).toString("hex");
+    await db.execute(
+      `INSERT INTO proveedores_servicios (id, rut, nombre, tipo, servicio, telefono, email, notas, created_at)
+       VALUES (?,?,?,?,?,?,?,?,?)`,
+      [id, b.rut||null, b.nombre, b.tipo||"persona", b.servicio||null, b.telefono||null, b.email||null, b.notas||null, new Date().toISOString()]
+    );
+    return res.json({ ok: true, id });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error creando proveedor." });
+  }
+});
+
+// ACTUALIZAR PROVEEDOR
+app.patch("/api/proveedores-servicios/:id", authenticate, async (req, res) => {
+  if (!["admin","editor"].includes(req.session.rol)) return res.status(403).json({ ok: false, error: "Sin permisos." });
+  try {
+    const b = req.body;
+    await db.execute(
+      `UPDATE proveedores_servicios SET nombre=COALESCE(?,nombre), rut=COALESCE(?,rut),
+        tipo=COALESCE(?,tipo), servicio=COALESCE(?,servicio), telefono=COALESCE(?,telefono),
+        email=COALESCE(?,email), notas=COALESCE(?,notas) WHERE id=?`,
+      [b.nombre??null, b.rut??null, b.tipo??null, b.servicio??null, b.telefono??null, b.email??null, b.notas??null, req.params.id]
+    );
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error actualizando proveedor." });
+  }
+});
+
+// ELIMINAR PROVEEDOR (solo admin)
+app.delete("/api/proveedores-servicios/:id", authenticate, async (req, res) => {
+  if (req.session.rol !== "admin") return res.status(403).json({ ok: false, error: "Sin permisos." });
+  try {
+    await db.execute("DELETE FROM proveedores_servicios WHERE id = ?", [req.params.id]);
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error eliminando proveedor." });
+  }
+});
+
+/* =========================
+   GASTOS - BOLETAS DE HONORARIOS
+========================= */
+
+await db.execute(`
+  CREATE TABLE IF NOT EXISTS boletas_honorarios (
+    id VARCHAR(64) PRIMARY KEY,
+    proveedor_id VARCHAR(64),
+    proveedor_nombre VARCHAR(255),
+    proveedor_rut VARCHAR(32),
+    servicio VARCHAR(255),
+    fecha VARCHAR(20),
+    periodo VARCHAR(10),
+    monto_bruto BIGINT DEFAULT 0,
+    retencion_pct DECIMAL(5,2),
+    monto_retencion BIGINT DEFAULT 0,
+    monto_liquido BIGINT DEFAULT 0,
+    adj_boleta TEXT,
+    adj_boleta_nombre VARCHAR(255),
+    notas TEXT,
+    created_at VARCHAR(64)
+  )
+`);
+
+// LISTAR BOLETAS DE HONORARIOS
+app.get("/api/boletas-honorarios", authenticate, async (req, res) => {
+  try {
+    const [rows] = await db.execute(
+      "SELECT * FROM boletas_honorarios ORDER BY fecha DESC"
+    );
+    return res.json({ ok: true, boletas: rows });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error obteniendo boletas de honorarios." });
+  }
+});
+
+// CREAR BOLETA DE HONORARIOS
+app.post("/api/boletas-honorarios", authenticate, async (req, res) => {
+  if (!["admin","editor"].includes(req.session.rol)) return res.status(403).json({ ok: false, error: "Sin permisos." });
+  try {
+    const b = req.body;
+    if (!b.monto_bruto) return res.status(400).json({ ok: false, error: "Falta monto bruto." });
+    const id = "bh_" + Date.now().toString(36) + "_" + crypto.randomBytes(3).toString("hex");
+    const retPct = b.retencion_pct ?? 13.75;
+    const bruto = parseInt(b.monto_bruto) || 0;
+    const retencion = Math.round(bruto * retPct / 100);
+    const liquido = bruto - retencion;
+
+    await db.execute(
+      `INSERT INTO boletas_honorarios (id, proveedor_id, proveedor_nombre, proveedor_rut, servicio,
+        fecha, periodo, monto_bruto, retencion_pct, monto_retencion, monto_liquido, notas, created_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [id, b.proveedor_id||null, b.proveedor_nombre||null, b.proveedor_rut||null, b.servicio||null,
+       b.fecha||null, b.periodo||null, bruto, retPct, retencion, liquido, b.notas||null, new Date().toISOString()]
+    );
+    return res.json({ ok: true, id, monto_retencion: retencion, monto_liquido: liquido });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error creando boleta." });
+  }
+});
+
+// ELIMINAR BOLETA HONORARIOS
+app.delete("/api/boletas-honorarios/:id", authenticate, async (req, res) => {
+  if (req.session.rol !== "admin") return res.status(403).json({ ok: false, error: "Sin permisos." });
+  try {
+    await db.execute("DELETE FROM boletas_honorarios WHERE id = ?", [req.params.id]);
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error eliminando boleta." });
+  }
+});
+
+// ADJUNTO BOLETA HONORARIOS
+app.patch("/api/boletas-honorarios/:id/adjuntos", authenticate, async (req, res) => {
+  if (!["admin","editor"].includes(req.session.rol)) return res.status(403).json({ ok: false, error: "Sin permisos." });
+  try {
+    const { valor, nombre } = req.body;
+    await db.execute(
+      "UPDATE boletas_honorarios SET adj_boleta = ?, adj_boleta_nombre = ? WHERE id = ?",
+      [valor ?? null, valor ? (nombre ?? null) : null, req.params.id]
+    );
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error guardando adjunto." });
+  }
+});
+
+/* =========================
+   GASTOS - OTROS GASTOS
+========================= */
+
+await db.execute(`
+  CREATE TABLE IF NOT EXISTS otros_gastos (
+    id VARCHAR(64) PRIMARY KEY,
+    descripcion VARCHAR(255) NOT NULL,
+    categoria VARCHAR(50) DEFAULT 'general',
+    monto BIGINT DEFAULT 0,
+    fecha VARCHAR(20),
+    periodo VARCHAR(10),
+    proveedor VARCHAR(255),
+    tipo_respaldo VARCHAR(50) DEFAULT 'sin_respaldo',
+    adj_respaldo TEXT,
+    adj_respaldo_nombre VARCHAR(255),
+    notas TEXT,
+    created_at VARCHAR(64)
+  )
+`);
+
+// LISTAR OTROS GASTOS
+app.get("/api/otros-gastos", authenticate, async (req, res) => {
+  try {
+    const [rows] = await db.execute("SELECT * FROM otros_gastos ORDER BY fecha DESC");
+    return res.json({ ok: true, gastos: rows });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error obteniendo gastos." });
+  }
+});
+
+// CREAR OTRO GASTO
+app.post("/api/otros-gastos", authenticate, async (req, res) => {
+  if (!["admin","editor"].includes(req.session.rol)) return res.status(403).json({ ok: false, error: "Sin permisos." });
+  try {
+    const b = req.body;
+    if (!b.descripcion) return res.status(400).json({ ok: false, error: "Falta descripción." });
+    const id = "og_" + Date.now().toString(36) + "_" + crypto.randomBytes(3).toString("hex");
+    await db.execute(
+      `INSERT INTO otros_gastos (id, descripcion, categoria, monto, fecha, periodo, proveedor, tipo_respaldo, notas, created_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?)`,
+      [id, b.descripcion, b.categoria||"general", b.monto||0, b.fecha||null, b.periodo||null,
+       b.proveedor||null, b.tipo_respaldo||"sin_respaldo", b.notas||null, new Date().toISOString()]
+    );
+    return res.json({ ok: true, id });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error creando gasto." });
+  }
+});
+
+// ELIMINAR OTRO GASTO
+app.delete("/api/otros-gastos/:id", authenticate, async (req, res) => {
+  if (req.session.rol !== "admin") return res.status(403).json({ ok: false, error: "Sin permisos." });
+  try {
+    await db.execute("DELETE FROM otros_gastos WHERE id = ?", [req.params.id]);
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error eliminando gasto." });
+  }
+});
+
+// ADJUNTO OTRO GASTO
+app.patch("/api/otros-gastos/:id/adjuntos", authenticate, async (req, res) => {
+  if (!["admin","editor"].includes(req.session.rol)) return res.status(403).json({ ok: false, error: "Sin permisos." });
+  try {
+    const { valor, nombre } = req.body;
+    await db.execute(
+      "UPDATE otros_gastos SET adj_respaldo = ?, adj_respaldo_nombre = ? WHERE id = ?",
+      [valor ?? null, valor ? (nombre ?? null) : null, req.params.id]
+    );
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error guardando adjunto." });
+  }
+});
+
+/* =========================
+   GASTOS - ANÁLISIS CONSOLIDADO
+========================= */
+app.get("/api/analisis/gastos", authenticate, async (req, res) => {
+  try {
+    const [trabajadores] = await db.execute("SELECT id, nombre, rut, cargo, sueldo_base, estado FROM trabajadores");
+    const [liquidaciones] = await db.execute(
+      "SELECT trabajador_id, periodo, anio, mes, total_haberes_imponibles, total_descuentos, sueldo_liquido, costo_empresa_total FROM liquidaciones"
+    );
+    const [boletasH] = await db.execute(
+      "SELECT id, proveedor_nombre, servicio, fecha, periodo, monto_bruto, monto_retencion, monto_liquido FROM boletas_honorarios"
+    );
+    const [otrosG] = await db.execute(
+      "SELECT id, descripcion, categoria, monto, fecha, periodo, tipo_respaldo FROM otros_gastos"
+    );
+    return res.json({ ok: true, trabajadores, liquidaciones, boletas_honorarios: boletasH, otros_gastos: otrosG });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: "Error obteniendo datos de gastos." });
+  }
+});
