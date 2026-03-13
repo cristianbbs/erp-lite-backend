@@ -249,6 +249,21 @@ function repairBrokenCodes(s) {
   return (s || "").replace(/([A-Z]{2,5})\s*-\s*(\d{1,5})/g, "$1-$2");
 }
 
+// Normalizar códigos erróneos del PDF al código correcto del sistema
+const CODIGO_NORMALIZACION = {
+  "HC-201":    "HC-102",
+  "HP-102":    "HF-202",
+  "RAP-20000": "RAP-20",
+  "BAP-20000": "BAP-20",
+  "BAP-6000":  "BAP-06",
+  "BP-20000":  "BP-20",
+};
+
+function normalizarCodigo(code) {
+  const c = (code || "").toUpperCase().trim();
+  return CODIGO_NORMALIZACION[c] || c;
+}
+
 function deglueItemTail(line) {
   let s = (line || "").trim();
   s = s.replace(/(\d)([A-Za-zÁÉÍÓÚÑñ])/g, "$1 $2").replace(/([A-Za-zÁÉÍÓÚÑñ])(\d)/g, "$1 $2").replace(/\s+/g, " ").trim();
@@ -404,7 +419,7 @@ function parseItems(text) {
     if (!mTail) { for (const m of chunkSan.matchAll(tailFindRe)) lastFound = m; if (lastFound) mTail = lastFound; }
     if (!mTail) {
       const descripcion = cleanDesc(chunkSan.replace(noiseRe, "").trim()) || null;
-      if (descripcion) items.push({ codigo: code, descripcion, cantidad: null, precio: null, valor: null });
+      if (descripcion) items.push({ codigo: normalizarCodigo(code), descripcion, cantidad: null, precio: null, valor: null });
       continue;
     }
     let qtyRaw = mTail[1]; let precioRaw = mTail[3]; let valorRaw = mTail[4];
@@ -422,7 +437,7 @@ function parseItems(text) {
     else { const tailFull = mTail[0]; descPart = chunkSan.slice(0, chunkSan.length - tailFull.length).trim(); }
     descPart = descPart.replace(noiseRe, "").trim();
     const descripcion = cleanDesc(descPart) || null;
-    items.push({ codigo: code, descripcion, cantidad, precio, valor });
+    items.push({ codigo: normalizarCodigo(code), descripcion, cantidad, precio, valor });
   }
   return items;
 }
@@ -2450,3 +2465,4 @@ app.get("/api/analisis/gastos", authenticate, async (req, res) => {
     return res.status(500).json({ ok: false, error: "Error obteniendo datos de gastos." });
   }
 });
+
